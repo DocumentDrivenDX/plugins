@@ -58,18 +58,26 @@ installing it, run `claude --plugin-dir /path/to/docsync`.
 ## Release
 
 The marketplace, [DocumentDrivenDX/plugins](https://github.com/DocumentDrivenDX/plugins),
-holds a built copy of the plugin under `plugins/docsync`. Releases are made
-locally; there are no hosted jobs.
+holds a built copy of the plugin under `plugins/docsync`. GitHub Actions
+publishes it when a release tag is pushed.
 
 1. Give `.claude-plugin/plugin.json` and `package.json` one new version.
    Installed copies update only when the version changes.
 2. Run `sh scripts/dev.sh check` and `sh scripts/dev.sh plugin-check`, then
-   commit and push. Publish only from a tree that contains `origin/main`.
-3. In an up-to-date checkout of the marketplace, run
-   `sh scripts/dev.sh publish-plugin <that checkout>`. It replaces only
-   `plugins/docsync`, refuses changed files under a published version, and
-   commits and pushes nothing.
-4. Run `sh scripts/dev.sh plugin-check <that checkout>`, then commit there as
-   `Publish docsync <version>` and push.
+   commit and push. The workflow runs no tests.
+3. Tag that commit `v<version>` and push the tag. Publishing a release on GitHub
+   for a new tag does the same.
+
+The [workflow](.github/workflows/publish.yml) creates the tag's GitHub release
+if it has none, even if publishing then fails, so a release does not show that
+the version reached the marketplace; the workflow run does. It replaces only
+`plugins/docsync` and refuses a tag that does not match the version, changed
+files under a published version, or a version older than the published one.
+
+It pushes with a short-lived token of a GitHub App installed only on the
+marketplace repository, with Contents read and write. This repository needs the
+app's client ID in the variable `PLUGINS_APP_CLIENT_ID` and its private key in
+the secret `PLUGINS_APP_PRIVATE_KEY`. Anyone who can push a release tag here, or
+push to the marketplace, can change what installs.
 
 MIT License.
