@@ -101361,7 +101361,8 @@ var FULLY_CHECKED_KINDS = new Set([
   "text_review",
   "comparison_run",
   "passage",
-  "resolution"
+  "resolution",
+  "annotation"
 ]);
 var SOURCE_BINDING_FIELDS = [
   "type",
@@ -103812,7 +103813,8 @@ var TYPES = {
         "unclassified_note",
         "unread_content",
         "duplicate_candidate",
-        "original_changed"
+        "original_changed",
+        "year_parenthesis"
       ]
     },
     reason: {
@@ -103882,7 +103884,8 @@ var TYPES = {
         "repoint",
         "replace",
         "bind",
-        "close"
+        "close",
+        "restore_text"
       ]
     },
     citation: {
@@ -107131,6 +107134,9 @@ function checkRules(record, problems) {
     if (reviewed === "model" && record.outcome !== "flagged")
       problems.push(invalid("model_verification", "/outcome"));
   }
+  if (record.kind === "annotation" && (record.item !== undefined ? record.sentence !== undefined || record.source !== undefined : record.source !== undefined && record.sentence === undefined)) {
+    problems.push(invalid("bad_binding", "/item"));
+  }
   if (record.kind === "resolution" && typeof record.response === "string" && typeof record.response_sha256 === "string" && sha256(record.response) !== record.response_sha256) {
     problems.push(invalid("response_digest_mismatch", "/response_sha256"));
   }
@@ -107672,7 +107678,7 @@ var TEMPLATES = {
   "source.pages:check_error": CHECK_FAILED,
   "source.labels:label_repeated": explain("Two pages in sequence carry the same printed label.", LABEL_WHY, ["Look at the page images. Correct the page map (`source label`), or leave a page without a label if its number is not established."], ["relabel"]),
   "source.labels:label_backwards": explain("Printed page labels go backwards.", LABEL_WHY, ["Look at the page images. A second numbering bound into one file can do this: label only the pages of the work you cite."], ["relabel"]),
-  "source.labels:label_jump": explain("Printed page numbers advance by more than the pages do, as when pages are missing from the original or a label is wrong.", LABEL_WHY, ["Look at the page images. If leaves are missing from your copy, the finding records that; otherwise correct the page map (`source label`)."], ["relabel"]),
+  "source.labels:label_jump": explain("Printed page numbers advance by more than the pages do, as when pages are missing from the original or a label is wrong.", LABEL_WHY, ["Nothing in the text shows that the pages run on. If leaves are missing from your copy, capture a complete one; if a label is wrong, correct the page map (`source label`)."], ["relabel", "capture_source"]),
   "source.labels:folio_differs": explain("A page number printed on a page differs from the label recorded for that page.", LABEL_WHY, ["Look at the page image and correct whichever is wrong."], ["relabel"]),
   "source.labels:check_error": CHECK_FAILED,
   "source.footnotes:marker_without_note": explain("A note marker in the text has no note on its page or section.", NOTE_WHY, ["Compare the page with the original. The note may continue from or onto another page, or the conversion may have lost it."]),
@@ -107708,21 +107714,22 @@ var TEMPLATES = {
   "locator.extent:check_error": CHECK_FAILED,
   "meta.source:mismatch": explain("The source record disagrees with what the captured copy states about itself.", META_WHY, ["Compare both values with the title page of the work. Correct the record if it is wrong; if the copy is a different edition or a misdescribed file, capture the right one."], ["correct_record", "capture_source"]),
   "meta.source:source_damaged": explain("The source's details could not be compared with a copy: its source file is damaged.", META_WHY, ["See the source.pages finding and repair the source file."], ["restore_source"]),
-  "meta.source:not_found_in_copy": explain("Some of the source's details were not found in what the copy states or in the text of its title page. The text there may be recognized text with errors.", META_WHY, ["Look at the title page itself. If the record is right, a person can confirm it: `review add <text id> --scope source_details --fields <fields> --against <what you looked at> --outcome agrees --actor person:<name>`. If the title page is elsewhere, name it in the source file's identity."], ["confirm_details", "correct_record"]),
-  "meta.source:nothing_to_compare": explain("The source record has no title, so its details could not be compared with the copy.", META_WHY, ["Record the title from the work itself."], ["correct_record"]),
+  "meta.source:not_found_in_copy": explain("Some of the source's details are shown neither by the copy's title page text nor by a saved catalogue record, and nothing contradicts them.", META_WHY, ["Nothing needs doing: this is a limit of what was covered. A saved lookup or a copy with a clearer text would corroborate more. The author may also record what the title page shows (`review add --scope source_details`)."]),
+  "meta.source:nothing_to_compare": explain("The source record has no title yet, so its details could not be compared with the copy.", META_WHY, ["Nothing needs doing. Once a title is recorded, it is compared."]),
   "meta.source:check_error": CHECK_FAILED,
   "meta.resolver:mismatch": explain("The source record disagrees with a saved catalogue lookup.", META_WHY, ["Compare both with the work itself. Correct the record if it is wrong. A catalogue can be wrong or describe another edition: if so, keep the record and the finding shows the difference."], ["correct_record"]),
-  "meta.resolver:no_lookup": explain("The source's details have not been compared with any catalogue: no lookup is saved.", META_WHY, ["Give the source's upstream record an identifier to look up, or run `resolve <source id> --via crossref|internet_archive --identifier <value>`. Some works are in neither catalogue."], ["resolve"]),
-  "meta.resolver:lookup_silent": explain("A saved lookup states no title, so nothing could be compared with it.", META_WHY, ["Look the work up by another identifier, or have a person confirm the details."], ["resolve", "confirm_details"]),
+  "meta.resolver:no_lookup": explain("The source's details have not been compared with any catalogue: no lookup that found the work is saved.", META_WHY, ["Nothing needs doing. `resolve` compares the source once an identifier is known; some works are in no catalogue it reads."], ["resolve"]),
+  "meta.resolver:lookup_silent": explain("A saved lookup states no title, so no title could be compared with it.", META_WHY, ["Nothing needs doing. A lookup by another identifier may state one."], ["resolve"]),
+  "meta.resolver:set_date": explain("A saved lookup is for one volume of a set and gives the set's date, and nothing else here shows the volume's year or contradicts it.", META_WHY, ["Nothing needs doing. A catalogue record that dates the volume, or a copy with a clearer title page text, would corroborate the year."]),
   "meta.resolver:check_error": CHECK_FAILED,
-  "id.resolves:no_lookup": explain("An identifier on the source record has not been looked up.", ID_WHY, ["Run `resolve` for it. This version looks up DOIs at Crossref and Internet Archive items; other identifiers cannot yet be checked."], ["resolve"]),
+  "id.resolves:no_lookup": explain("An identifier on the source record has not been looked up.", ID_WHY, ["Nothing needs doing. `resolve` looks up DOIs at Crossref and Internet Archive items; other identifiers cannot yet be looked up."], ["resolve"]),
   "id.resolves:not_found": explain("A catalogue did not find the work this identifier should name.", ID_WHY, ["Check the identifier against the work and correct or remove it."], ["correct_record"]),
   "id.resolves:other_work": explain("An identifier resolves to a work with a different title.", ID_WHY, ["Check which is wrong: the identifier or the record's title."], ["correct_record"]),
-  "id.resolves:lookup_silent": explain("The saved lookup states no title, or the record has none, so the identifier could not be compared.", ID_WHY, ["Check the identifier by hand."]),
-  "id.resolves:lookup_error": explain("The saved lookup is a response that could not be read.", ID_WHY, ["Run `resolve` again."], ["resolve"]),
+  "id.resolves:lookup_silent": explain("The saved lookup states no title, or the record has none, so the identifier could not be compared.", ID_WHY, ["Nothing needs doing. It is compared once both state a title."]),
+  "id.resolves:lookup_error": explain("The saved lookup is a response that could not be read.", ID_WHY, ["Nothing needs doing. Running `resolve` again replaces it."], ["resolve"]),
   "id.resolves:check_error": CHECK_FAILED,
   "number.present:figure_absent": explain("A figure in a sentence that cites this source was not found in the source's text.", NUMBER_WHY, ["Find the figure in the source and correct the sentence, or move the figure to a sentence that does not attribute it to this source. A converted or recognized text can also be wrong: look at the page."]),
-  "number.present:several_citations": explain("A sentence with a figure cites more than one source, so which one holds the figure could not be judged.", NUMBER_WHY, ["Check the figure by hand, or split the citation."]),
+  "number.present:several_citations": explain("A sentence with a figure cites more than one source, so which one holds the figure could not be judged.", NUMBER_WHY, ["Nothing needs doing. A sentence that cites one source has its figures looked for there."]),
   "number.present:text_unavailable": explain("A figure could not be compared: the source has no usable text.", NUMBER_WHY, ["Capture or repair the source's text."], ["capture_source"]),
   "number.present:check_error": CHECK_FAILED,
   "coordinate.stray:coordinate_text": explain("Text in a project file looks like a map coordinate. The value is not repeated here.", COORDINATE_WHY, ["Look at the position in the evidence. If it is a sensitive site, remove the value from the file (git history may still hold it). If it is public or not a coordinate, you need do nothing."]),
@@ -107763,6 +107770,7 @@ var PROBLEMS = {
   model_verification: "a model's review can only flag; it is never a person's verification",
   response_digest_mismatch: "the saved response does not match its digest",
   bad_address: "a passage address needs, for each part, a start before its end",
+  bad_binding: "an annotation binds a sentence and its source, or one record, never both",
   front_matter_missing: "the file does not begin with a front matter block",
   front_matter_unreadable: "the front matter is not one readable JSON object",
   text_outside_block: "there is text before the first block line",
@@ -107793,7 +107801,8 @@ function result(parts) {
     why: explanation?.why ?? "",
     suggestions: [...explanation?.suggestions ?? []],
     annotations: [],
-    open: outcome !== "pass"
+    ...parts.coverage && outcome === "unverifiable" ? { coverage_only: true } : {},
+    open: outcome === "fail" || outcome === "unverifiable" && !parts.coverage
   };
 }
 function sortResults(results) {
@@ -108191,6 +108200,88 @@ function placeOf(view, index) {
 }
 function paragraphNumbers(part, start, end) {
   return part.paragraphs.flatMap((p, i) => p.start < end && p.end > start ? [part.firstParagraph + i] : []);
+}
+
+// packages/core/src/annotations.ts
+var NOT_DISMISSIBLE = new Set(["source.held", "record.valid", "build.uncommitted"]);
+function bindingOf(corpus, found) {
+  if (found.sentence) {
+    const source = found.source === undefined ? undefined : corpus.byId.get(found.source)?.data;
+    return {
+      sentence: { ...found.sentence },
+      ...source ? { source: { source: found.source, record_sha256: sourceBinding(source) } } : {}
+    };
+  }
+  return found.item ? { item: { ...found.item } } : {};
+}
+var valueOf = (found, name) => found.evidence.find((e) => e.name === name)?.value;
+function comparedOf(found) {
+  const [cited, stored, profile] = [valueOf(found, "cited_text"), valueOf(found, "source_passage"), valueOf(found, "profile")];
+  return found.reason_code === "near_match" && cited !== undefined && stored !== undefined && profile !== undefined ? { cited_text: cited, stored_text: stored, profile } : undefined;
+}
+var same = (a, b) => canonical({ value: a ?? false }) === canonical({ value: b ?? false });
+function annotate(corpus, results) {
+  const notes = active(corpus, "annotation").sort((a, b) => a.path < b.path ? -1 : 1);
+  if (notes.length === 0)
+    return results;
+  return results.map((found) => {
+    if (found.outcome === "pass")
+      return found;
+    const binding = bindingOf(corpus, found);
+    const applying = notes.flatMap((file) => {
+      const note = file.data;
+      if (note.check !== found.check || note.finding_key !== found.finding_key)
+        return [];
+      if (!["sentence", "source", "item"].every((name) => same(note[name], binding[name])))
+        return [];
+      if (note.compared !== undefined) {
+        const now = comparedOf(found);
+        const then = isObject(note.compared) ? note.compared : {};
+        if (!now || Object.entries(now).some(([k, v]) => then[k] !== v))
+          return [];
+      }
+      const by = isObject(note.written) && isObject(note.written.by) ? note.written.by : {};
+      return [{ id: idOf(file), effect: String(note.effect), by: `${String(by.kind)} ${String(by.name)}`, person: by.kind === "person", reason: String(note.reason) }];
+    });
+    if (applying.length === 0)
+      return found;
+    const dismissed = !NOT_DISMISSIBLE.has(found.check) && applying.some((n) => n.effect === "dismiss" && n.person);
+    return { ...found, annotations: applying.map(({ person: _p, ...n }) => n), open: found.open && !dismissed };
+  });
+}
+function planAnnotation(corpus, results, request) {
+  const found = results.find((r) => r.finding_key === request.finding);
+  if (!found || found.outcome === "pass")
+    throw new InvalidInput("No finding of this project has that finding key. Take it from the report `check` writes.");
+  if (request.reason.trim() === "")
+    throw new InvalidInput("The reason is empty.");
+  if (request.effect === "dismiss") {
+    if (request.actor.kind !== "person")
+      throw new InvalidInput("Only a person can dismiss a finding. A model or script records what it found with --effect explain, and the finding stays open.");
+    if (NOT_DISMISSIBLE.has(found.check))
+      throw new InvalidInput(`A ${found.check} finding can be explained, not dismissed.`);
+  }
+  const id = `${KINDS.annotation.prefix}${request.token()}`;
+  const stamp = { at: request.now.toISOString().replace(/\.\d+Z$/, "Z"), by: { ...request.actor } };
+  const compared = comparedOf(found);
+  const text = canonical({
+    schema: RECORD_SCHEMA,
+    id,
+    kind: "annotation",
+    created: stamp,
+    effect: request.effect,
+    check: found.check,
+    finding_key: found.finding_key,
+    ...bindingOf(corpus, found),
+    ...compared ? { compared } : {},
+    reason: request.reason,
+    written: stamp
+  });
+  const problems = [];
+  checkShape("Annotation", parseJson(text).value, "", "annotation", problems, []);
+  if (problems.length > 0)
+    throw new InvalidInput(`These values do not make a valid annotation record (${problems.map((p) => `${p.code} at ${p.field}`).join(", ")}).`);
+  return { id, path: recordPath("annotation", id), text, finding: found };
 }
 
 // packages/core/src/checks/coordinates.ts
@@ -108716,16 +108807,99 @@ function titlesMatch(a, b) {
   const [x, y] = [foldName(a), foldName(b)];
   return x === y || x === foldName(mainTitle(b)) || foldName(mainTitle(a)) === y;
 }
+function headingMatches(name, heading) {
+  const filed = /^([^,.()]+?)\s*(?:\([^()]*\))?\.\s+([^,.()]+?)\.?$/.exec(heading.trim());
+  if (!filed)
+    return false;
+  const [, parent, body] = filed;
+  return [`${body} of ${parent}`, `${body} of the ${parent}`].some((spoken) => foldName(spoken) === foldName(name));
+}
+var namesWithin = (record, stated) => {
+  const words = foldName(stated.join(" "));
+  return record.authors.every((a) => holds(words, foldName(a)) || record.bodies.includes(a) && stated.some((s) => headingMatches(a, s)));
+};
+function catalogueTitleMatches(record, theirs) {
+  if (record.title === undefined)
+    return false;
+  return titlesMatch(record.title, theirs) || record.collection !== undefined && foldName(`${record.collection} ${record.title}`) === foldName(theirs);
+}
+function setVolume(lookup) {
+  if (lookup.resolver !== "internet_archive" || typeof lookup.response !== "string")
+    return;
+  let value;
+  try {
+    value = JSON.parse(lookup.response);
+  } catch {
+    return;
+  }
+  const stated = isObject(value) ? text(value.volume) : undefined;
+  if (!stated)
+    return;
+  const years = /\(([^()]*)\)\s*$/.exec(stated)?.[1]?.match(/(?<!\d)1[5-9]\d\d(?!\d)|(?<!\d)20\d\d(?!\d)/g) ?? [];
+  return years.length > 0 ? { stated, from: Number(years[0]), to: Number(years.at(-1)) } : { stated };
+}
+function compareLookup(record, lookup) {
+  const says = lookup.found;
+  const catalogue = {
+    title: text(says.title),
+    authors: (Array.isArray(says.contributors) ? says.contributors : []).map(String),
+    year: /\d{4}/.exec(String(says.issued ?? ""))?.[0],
+    venue: text(says.venue)
+  };
+  const out = [];
+  const judge = (field, mine, theirs, same) => {
+    if (mine !== undefined)
+      out.push({ field, mine, theirs, verdict: theirs === "" ? "silent" : same() ? "agrees" : "differs" });
+  };
+  judge("title", record.title, catalogue.title ?? "", () => catalogueTitleMatches(record, catalogue.title));
+  judge("authors", record.authors.length > 0 ? record.authors.join("; ") : undefined, catalogue.authors.join("; "), () => namesWithin(record, catalogue.authors));
+  const set = setVolume(lookup);
+  if (set && record.year && catalogue.year && Number(record.year) > Number(catalogue.year)) {
+    const dated = `the catalogue dates this item ${catalogue.year}, and it is the volume "${set.stated}" of a set`;
+    const said = { field: "year", mine: record.year, theirs: `${catalogue.year}; volume ${set.stated}` };
+    if (set.to === undefined)
+      out.push({ ...said, verdict: "set_date", note: `${dated}, with no years for the volume` });
+    else if (set.from >= Number(catalogue.year) && Number(record.year) === set.to) {
+      out.push({ ...said, verdict: "agrees", note: `${dated}; the record's year is the last year the volume statement gives` });
+    } else
+      out.push({ ...said, verdict: "differs" });
+  } else
+    judge("year", record.year, catalogue.year ?? "", () => record.year === catalogue.year);
+  judge("venue", record.venue, catalogue.venue ?? "", () => titlesMatch(record.venue, catalogue.venue));
+  return out;
+}
+var foundLookups = (corpus, source) => newest(lookupsOf(corpus, source)).filter((l) => l.data.outcome === "found" && isObject(l.data.found));
+var lookupName = (lookup) => {
+  const identifier = isObject(lookup.data.identifier) ? lookup.data.identifier : {};
+  return `the ${String(lookup.data.resolver)} record of ${String(identifier.scheme)}:${String(identifier.value)} (${idOf(lookup)})`;
+};
+function corroboration(corpus, source, record, field) {
+  const said = foundLookups(corpus, source).flatMap((lookup) => compareLookup(record, lookup.data).filter((s) => s.field === field).map((s) => ({ ...s, lookup })));
+  if (said.some((s) => s.verdict === "differs"))
+    return [];
+  return said.filter((s) => s.verdict === "agrees").map((s) => lookupName(s.lookup));
+}
+var coverageLine = (value) => meta3("coverage", value);
 function describe(source) {
   const title = isObject(source.title) ? text(source.title.value) : undefined;
-  const authors = list2(source.contributions).filter((c) => c.role === "author" || c.role === "editor").flatMap((c) => {
-    const name = isObject(c.as_printed) ? c.as_printed : {};
-    return text(name.family) ?? text(name.literal) ?? [];
-  });
+  const names = list2(source.contributions).filter((c) => c.role === "author" || c.role === "editor").map((c) => isObject(c.as_printed) ? c.as_printed : {});
+  const authors = names.flatMap((name) => text(name.family) ?? text(name.literal) ?? []);
+  const bodies = names.flatMap((name) => text(name.family) === undefined ? text(name.literal) ?? [] : []);
   const year = isObject(source.issued) ? /\d{4}/.exec(String(source.issued.edtf ?? ""))?.[0] : undefined;
-  const container = list2(source.bib).find((b) => b.name === "container-title");
-  const venue = container && isObject(container.value) ? text(container.value.value) : undefined;
-  return { ...title ? { title } : {}, authors, ...year ? { year } : {}, ...venue ? { venue } : {} };
+  const bib = (name) => {
+    const field = list2(source.bib).find((b) => b.name === name);
+    return field && isObject(field.value) ? text(field.value.value) : undefined;
+  };
+  const venue = bib("container-title");
+  const collection = bib("collection-title");
+  return {
+    ...title ? { title } : {},
+    authors,
+    bodies,
+    ...year ? { year } : {},
+    ...venue ? { venue } : {},
+    ...collection ? { collection } : {}
+  };
 }
 var meta3 = (name, value) => ({ name, class: "metadata", value });
 var location2 = (name, value) => ({ name, class: "location", value });
@@ -108733,9 +108907,23 @@ function titlePages(view) {
   const identity = isObject(view.loaded.manifest.data.identity) ? view.loaded.manifest.data.identity : {};
   const named = Array.isArray(identity.title_pages) ? identity.title_pages.map(Number) : [];
   const parts = named.length > 0 ? view.parts.filter((p) => named.includes(p.index)) : view.parts.filter((p) => p.streams.main !== "" || p.streams.furniture !== "").slice(0, 2);
-  return { indexes: parts.map((p) => p.index), text: foldName(parts.map((p) => `${p.streams.furniture}
+  const raw = parts.map((p) => `${p.streams.furniture}
 ${p.streams.main}`).join(`
-`)) };
+`);
+  return { indexes: parts.map((p) => p.index), text: foldName(raw), raw };
+}
+function misreadRoman(text, year) {
+  const wanted = toRoman(year).toUpperCase();
+  return (text.match(/(?<![\p{L}\p{N}])M[MDCLXVIirl1|!]{3,}(?![\p{L}\p{N}])/gu) ?? []).find((token) => token.replace(/[irl1|!]/g, "I") === wanted);
+}
+function imprintYears(text) {
+  return text.split(`
+`).flatMap((line) => {
+    const figures = /(?:^|[,:;])\s*((?:1[5-9]|20)\d\d)\s*\.?\s*$/.exec(line.trim())?.[1];
+    const numeral = /^(M[DCLXVI]{3,})\s*\.?$/.exec(line.trim())?.[1];
+    const roman = numeral ? fromRoman(numeral.toLowerCase()) : undefined;
+    return figures ? [figures] : roman !== undefined && roman >= 1500 && roman <= 2099 ? [String(roman)] : [];
+  });
 }
 function againstCopy(record, view) {
   const identity = isObject(view.loaded.manifest.data.identity) ? view.loaded.manifest.data.identity : {};
@@ -108752,24 +108940,28 @@ function againstCopy(record, view) {
     year: /\d{4}/.exec(String(identity.issued ?? ""))?.[0],
     venue: text(identity.venue)
   };
-  const judge = (field, value, byIdentity, onPage, copySays) => {
-    const status = byIdentity === true || onPage ? "agrees" : byIdentity === false ? "differs" : "not_found";
+  const judge = (field, value, byIdentity, onPage, copySays, asRead) => {
+    const status = byIdentity === true || onPage ? "agrees" : byIdentity === false || copySays !== undefined && byIdentity === undefined ? "differs" : "not_found";
     statuses.set(field, status);
     evidence.push(meta3(`${field}_in_record`, value));
     if (status === "differs")
       evidence.push({ name: `${field}_the_copy_states`, class: "source_text", value: copySays });
-    evidence.push(meta3(`${field}_result`, status === "agrees" ? [byIdentity === true ? "agrees with what the copy states" : "", onPage ? "found on the title page" : ""].filter(Boolean).join("; ") : status === "differs" ? "the copy states otherwise, and the title page text does not show the record's value" : "not found in what the copy states or in its title page text"));
+    evidence.push(meta3(`${field}_result`, status === "agrees" ? [byIdentity === true ? "agrees with what the copy states" : "", onPage ? asRead ?? "found on the title page" : ""].filter(Boolean).join("; ") : status === "differs" ? "the copy states otherwise, and the title page text does not show the record's value" : "not found in what the copy states or in its title page text"));
   };
   if (record.title) {
     judge("title", record.title, stated.title === undefined ? undefined : titlesMatch(record.title, stated.title), holds(pages.text, foldName(record.title)), stated.title);
   }
   if (record.authors.length > 0) {
-    const names = foldName(stated.authors.join(" "));
-    const byIdentity = stated.authors.length === 0 ? undefined : record.authors.every((a) => holds(names, foldName(a)));
+    const byIdentity = stated.authors.length === 0 ? undefined : namesWithin(record, stated.authors);
     judge("authors", record.authors.join("; "), byIdentity, record.authors.every((a) => holds(pages.text, foldName(a))), stated.authors.join("; "));
   }
-  if (record.year)
-    judge("year", record.year, stated.year === undefined ? undefined : stated.year === record.year, holds(pages.text, record.year) || holds(pages.text, toRoman(Number(record.year))), stated.year);
+  if (record.year) {
+    const plain = holds(pages.text, record.year) || holds(pages.text, toRoman(Number(record.year)));
+    const misread = plain ? undefined : misreadRoman(pages.raw, Number(record.year));
+    const shown = plain || misread !== undefined;
+    const other = !shown && stated.year === undefined ? imprintYears(pages.raw).join("; ") || undefined : stated.year;
+    judge("year", record.year, stated.year === undefined ? undefined : stated.year === record.year, shown, other, misread === undefined ? undefined : `found on the title page, in the roman numeral recognized as "${misread}"`);
+  }
   if (record.venue) {
     judge("venue", record.venue, stated.venue === undefined ? undefined : titlesMatch(record.venue, stated.venue), holds(pages.text, foldName(record.venue)), stated.venue);
   }
@@ -108812,11 +109004,25 @@ function sourceMetaResults(corpus, texts = new SourceTexts(corpus)) {
     if (differing.length > 0)
       return result({ ...shared(check, source), outcome: "fail", reason: "mismatch", evidence });
     if (!record.title)
-      return result({ ...shared(check, source), outcome: "unverifiable", reason: "nothing_to_compare", evidence });
-    const missing = [...judged.statuses].filter(([, s]) => s === "not_found").map(([f]) => f);
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: "nothing_to_compare", evidence, coverage: true });
+    const unshown = [...judged.statuses].filter(([, s]) => s === "not_found").map(([f]) => f);
+    const missing = [];
+    for (const field of unshown) {
+      const by = corroboration(corpus, idOf(source), record, field);
+      if (by.length === 0)
+        missing.push(field);
+      else {
+        evidence.push(meta3(`${field}_corroborated_by`, by.join("; ")), coverageLine(`the title page text does not show the ${field}; a saved catalogue record bears it out`));
+      }
+    }
     if (missing.length === 0)
       return result({ ...shared(check, source), outcome: "pass", evidence });
-    return confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason: "not_found_in_copy", evidence: [...evidence, meta3("not_found", missing.join(", "))] }), confirmation(corpus, source, missing));
+    const open = [
+      ...evidence,
+      meta3("not_found", missing.join(", ")),
+      coverageLine(`not corroborated: neither the title page text nor a saved catalogue record shows the ${missing.join(" or the ")}`)
+    ];
+    return confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason: "not_found_in_copy", evidence: open, coverage: true }), confirmation(corpus, source, missing));
   });
 }
 var score = (statuses) => [...statuses.values()].reduce((n, s) => n + (s === "differs" ? 100 : s === "not_found" ? 1 : 0), 0);
@@ -108833,48 +109039,57 @@ var newest = (lookups) => {
 };
 function resolverResults(corpus, texts = new SourceTexts(corpus)) {
   const check = "meta.resolver";
+  const copyShowsYear = (source, record) => texts.of(idOf(source)).views.some((view) => againstCopy(record, view).statuses.get("year") === "agrees");
   return describedSources(corpus, texts).map((source) => {
     const base = [location2("source_file", source.path), keyOf(source)];
-    const found = newest(lookupsOf(corpus, idOf(source))).filter((l) => l.data.outcome === "found" && isObject(l.data.found));
-    if (found.length === 0)
-      return result({ ...shared(check, source), outcome: "unverifiable", reason: "no_lookup", evidence: base });
+    const found = foundLookups(corpus, idOf(source));
+    if (found.length === 0) {
+      return result({
+        ...shared(check, source),
+        outcome: "unverifiable",
+        reason: "no_lookup",
+        coverage: true,
+        evidence: [...base, coverageLine("not compared with a catalogue: no lookup that found the work is saved")]
+      });
+    }
     const record = describe(source.data);
     const compared = new Set;
     const differing = new Set;
+    let yearOpen = false;
     const evidence = [...base];
     for (const lookup of found) {
-      const says = lookup.data.found;
-      const catalogue = {
-        title: text(says.title),
-        authors: (Array.isArray(says.contributors) ? says.contributors : []).map(String),
-        year: /\d{4}/.exec(String(says.issued ?? ""))?.[0],
-        venue: text(says.venue)
-      };
       evidence.push(location2("lookup_file", lookup.path), meta3("looked_up", `${String(lookup.data.resolver)} on ${String(lookup.data.queried_at).slice(0, 10)}`));
-      const judge = (field, mine, theirs, same) => {
-        if (mine === undefined)
-          return;
-        if (theirs === "") {
+      for (const said of compareLookup(record, lookup.data)) {
+        const { field } = said;
+        if (said.verdict === "silent")
           evidence.push(meta3(`${field}_not_compared`, "this lookup does not state it"));
-          return;
+        else if (said.verdict === "set_date") {
+          if (copyShowsYear(source, record)) {
+            evidence.push(meta3("year_not_compared", `${said.note}; the record's year is on the copy's title page`));
+          } else {
+            yearOpen = true;
+            evidence.push(meta3("year_in_record", said.mine), meta3("year_not_compared", `${said.note}, and the copy's title page text does not show the record's year`));
+          }
+        } else {
+          compared.add(field);
+          if (said.note)
+            evidence.push(meta3("year_of_volume", said.note));
+          if (said.verdict === "differs") {
+            differing.add(field);
+            evidence.push(meta3(`${field}_in_record`, said.mine), { name: `${field}_in_lookup`, class: "source_text", value: said.theirs });
+          }
         }
-        compared.add(field);
-        if (!same()) {
-          differing.add(field);
-          evidence.push(meta3(`${field}_in_record`, mine), { name: `${field}_in_lookup`, class: "source_text", value: theirs });
-        }
-      };
-      judge("title", record.title, catalogue.title ?? "", () => titlesMatch(record.title, catalogue.title));
-      judge("authors", record.authors.length > 0 ? record.authors.join("; ") : undefined, catalogue.authors.join("; "), () => record.authors.every((a) => holds(foldName(catalogue.authors.join(" ")), foldName(a))));
-      judge("year", record.year, catalogue.year ?? "", () => record.year === catalogue.year);
-      judge("venue", record.venue, catalogue.venue ?? "", () => titlesMatch(record.venue, catalogue.venue));
+      }
     }
     if (differing.size > 0)
       return result({ ...shared(check, source), outcome: "fail", reason: "mismatch", evidence });
     evidence.push(meta3("compared", [...compared].join(", ") || "nothing"));
+    const open = (reason, line, fields) => confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason, evidence: [...evidence, coverageLine(line)], coverage: true }), confirmation(corpus, source, fields));
+    if (yearOpen)
+      return open("set_date", "not corroborated: the catalogue gives only the date of the set a volume belongs to, and the title page text does not show the year", ["year"]);
     if (compared.has("title"))
       return result({ ...shared(check, source), outcome: "pass", evidence });
-    return confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason: "lookup_silent", evidence }), confirmation(corpus, source, ["title"]));
+    return open("lookup_silent", "not compared with a catalogue: the saved lookups state no title", ["title"]);
   });
 }
 var identifiedSources = (corpus, texts) => describedSources(corpus, texts).filter((s) => list2(s.data.identifiers).length > 0);
@@ -108885,18 +109100,19 @@ function identifierResults(corpus, texts = new SourceTexts(corpus)) {
     const base = [location2("source_file", source.path), keyOf(source), meta3("identifier", name)];
     const parts = { ...shared(check, source), locus: name };
     const lookup = lookupsOf(corpus, idOf(source)).find((l) => identifierKey(l.data.identifier) === identifierKey(identifier));
+    const uncompared = (reason, line, evidence) => result({ ...parts, outcome: "unverifiable", reason, evidence: [...evidence, coverageLine(line)], coverage: true });
     if (!lookup || isRetired(lookup.data))
-      return result({ ...parts, outcome: "unverifiable", reason: "no_lookup", evidence: base });
+      return uncompared("no_lookup", "identifiers with no saved lookup", base);
     const evidence = [...base, location2("lookup_file", lookup.path), meta3("looked_up", `${String(lookup.data.resolver)} on ${String(lookup.data.queried_at).slice(0, 10)}`)];
     if (lookup.data.outcome === "not_found")
       return result({ ...parts, outcome: "fail", reason: "not_found", evidence });
     if (lookup.data.outcome !== "found")
-      return result({ ...parts, outcome: "unverifiable", reason: "lookup_error", evidence });
+      return uncompared("lookup_error", "identifiers whose saved lookup could not be read", evidence);
     const theirs = isObject(lookup.data.found) ? text(lookup.data.found.title) : undefined;
     const mine = describe(source.data).title;
     if (!theirs || !mine)
-      return result({ ...parts, outcome: "unverifiable", reason: "lookup_silent", evidence });
-    if (titlesMatch(mine, theirs))
+      return uncompared("lookup_silent", "identifiers with no title on one side to compare", evidence);
+    if (catalogueTitleMatches(describe(source.data), theirs))
       return result({ ...parts, outcome: "pass", evidence });
     return result({ ...parts, outcome: "fail", reason: "other_work", evidence: [...evidence, meta3("title_in_record", mine), { name: "title_in_lookup", class: "source_text", value: theirs }] });
   }));
@@ -108950,7 +109166,9 @@ function numberResults(corpus, texts = new SourceTexts(corpus)) {
       ...outcome === "fail" ? [{ name: "not_found", class: "manuscript", value: missing.join(", ") }] : [],
       ...views.map((v) => ({ name: "source_text", class: "location", value: v.loaded.manifest.path }))
     ];
-    return [result({ check: "number.present", outcome, ...reason ? { reason } : {}, subject: subjectOf(citation), locus: `${idOf(citation)}#figures`, source, evidence, item: itemOf(citation), sentence })];
+    if (several)
+      evidence.push({ name: "coverage", class: "metadata", value: "figures in sentences that cite more than one source were not attributed to one" });
+    return [result({ check: "number.present", outcome, ...reason ? { reason } : {}, subject: subjectOf(citation), locus: `${idOf(citation)}#figures`, source, evidence, item: itemOf(citation), sentence, coverage: several })];
   });
 }
 
@@ -108984,12 +109202,43 @@ function pageResults(corpus) {
   });
 }
 var bare = (value) => value.trim().replace(/^[[(\u2014\u2013\s.-]+|[\])\u2014\u2013\s.-]+$/g, "");
+function runsOn(text, earlier, later) {
+  const mainOf = (index) => streamsOf(text.parts.find((p) => p.index === index).blocks).main.trim();
+  const [before, after] = [mainOf(earlier), mainOf(later)];
+  const head = /(\p{L}{2,})[-\u2010\u00ad]$/u.exec(before)?.[1];
+  const tail = /^\p{Ll}{2,}/u.exec(after)?.[0];
+  if (head && tail) {
+    const whole = foldName(head + tail);
+    const elsewhere = text.parts.some((p) => p.index !== earlier && p.index !== later && ` ${foldName(streamsOf(p.blocks).main)} `.includes(` ${whole} `));
+    if (elsewhere)
+      return `a word split between the two pages, "${head}-" and "${tail}", is written whole elsewhere in the source`;
+  }
+  const heading = /^(\p{Lu}[\p{L}'\u2019]+(?:[ \t]+\p{L}[\p{L}'\u2019]*){1,5})\.[ \t]*[\u2013\u2014\u2015]/u.exec(after)?.[1];
+  if (heading && foldName(heading).replaceAll(" ", "").length >= 10 && ` ${foldName(before)} `.includes(` ${foldName(heading)} `)) {
+    return `the second page opens with the heading "${heading}", words the first page announces`;
+  }
+  return;
+}
+function numberingOnly(text, earlier, later) {
+  if (!text.usable || text.damage.length > 0 || text.manifest.data.coverage !== "all" || later - earlier !== 1)
+    return;
+  const at = (index) => {
+    const label = text.parts.find((p) => p.index === index)?.front.label;
+    return typeof label === "string" ? numberOf(label) : undefined;
+  };
+  const inStep = (first) => {
+    const [a, b] = [at(first), at(first + 1)];
+    return a !== undefined && b !== undefined && a.style === b.style && b.value === a.value + 1;
+  };
+  return inStep(earlier - 1) && inStep(later) ? runsOn(text, earlier, later) : undefined;
+}
 function labelResults(corpus) {
   const check = "source.labels";
   return activeTexts(corpus).flatMap(([id, text]) => {
     if (text.manifest.data.paged !== true || !text.parts.some((p) => p.front.label !== undefined))
       return [];
     const found = [];
+    const observed = [];
     const last = new Map;
     for (const part of text.parts) {
       const label = typeof part.front.label === "string" ? part.front.label : undefined;
@@ -109009,15 +109258,27 @@ function labelResults(corpus) {
         continue;
       const [step, pages] = [number.value - before.value, part.index - before.index];
       const reason = step === 0 ? "label_repeated" : step < 0 ? "label_backwards" : step > pages ? "label_jump" : undefined;
-      if (reason) {
+      const sign = reason === "label_jump" ? numberingOnly(text, before.index, part.index) : undefined;
+      if (sign) {
+        const seen = `printed page ${before.label} is followed by ${label} on the next page of the original, with nothing shown missing`;
+        observed.push({ locus: `${part.index}#numbering`, evidence: [
+          at2("file", part.path),
+          meta4("labels", `page index ${before.index} is labelled ${before.label}; page index ${part.index} is labelled ${label}`),
+          meta4("observation", `${seen}: every page of the original is held, the numbers run on after the jump, and ${sign}`),
+          meta4("coverage", `observed in an original: ${seen}`)
+        ] });
+      } else if (reason) {
         found.push({ reason, locus: `${part.index}#${reason}`, evidence: [at2("file", part.path), meta4("labels", `page index ${before.index} is labelled ${before.label}; page index ${part.index} is labelled ${label}`)] });
       }
     }
     if (found.length === 0) {
       const labelled = text.parts.filter((p) => p.front.label !== undefined).length;
-      return [result({ ...common(check, text), outcome: "pass", locus: id, evidence: [at2("source_text", text.manifest.path), meta4("labelled", `${labelled} of ${text.parts.length} pages have a printed label`)] })];
+      return [result({ ...common(check, text), outcome: "pass", locus: id, evidence: [at2("source_text", text.manifest.path), meta4("labelled", `${labelled} of ${text.parts.length} pages have a printed label`), ...observed.flatMap((o) => o.evidence)] })];
     }
-    return found.map((f) => result({ ...common(check, text), outcome: "fail", reason: f.reason, locus: `${id}#${f.locus}`, evidence: f.evidence }));
+    return [
+      ...observed.map((o) => result({ ...common(check, text), outcome: "pass", locus: `${id}#${o.locus}`, evidence: o.evidence })),
+      ...found.map((f) => result({ ...common(check, text), outcome: "fail", reason: f.reason, locus: `${id}#${f.locus}`, evidence: f.evidence }))
+    ];
   });
 }
 function footnoteResults(corpus) {
@@ -109433,7 +109694,7 @@ var IMPLEMENTED_CHECKS = {
 function runChecks(corpus, tools) {
   const errors = [];
   const context = { texts: new SourceTexts(corpus), tools };
-  const results = sortResults(Object.entries(IMPLEMENTED_CHECKS).flatMap(([check, run]) => guarded(check, corpus, (c) => run(c, context), errors)));
+  const results = annotate(corpus, sortResults(Object.entries(IMPLEMENTED_CHECKS).flatMap(([check, run]) => guarded(check, corpus, (c) => run(c, context), errors))));
   const skipped = notRun(corpus);
   const unreviewed = unreviewedItems(corpus);
   const count = (test) => results.filter(test).length;
@@ -109442,7 +109703,7 @@ function runChecks(corpus, tools) {
     fail: count((r) => r.outcome === "fail"),
     unverifiable: count((r) => r.outcome === "unverifiable"),
     open: count((r) => r.open),
-    dismissed: 0,
+    dismissed: count((r) => !r.open && r.annotations.some((a) => a.effect === "dismiss")),
     confirmed: count((r) => r.confirmed_by !== undefined),
     unreviewed: unreviewed.length,
     could_not_check: count((r) => r.outcome === "unverifiable"),
@@ -109481,7 +109742,8 @@ var MADE_BY_COMMAND = {
   passage: "passage capture",
   comparison_run: "source verify or source compare",
   text_review: "review add",
-  resolution: "resolve"
+  resolution: "resolve",
+  annotation: "annotate"
 };
 function prepareRecord(request) {
   const { kind } = request;
@@ -110039,6 +110301,7 @@ function groupResults(results) {
   return [...groups.values()];
 }
 var printable = (text) => text.replace(/\r?\n|\f/g, " \u23CE ").replace(/\u00ad/g, "\xAC").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "?");
+var noteLines = (result) => result.annotations.map((note) => `       ${note.effect === "dismiss" ? "dismissed" : "explained"} by ${printable(note.by)} (${note.id}): ${printable(note.reason)}`);
 function renderFindings(results) {
   const lines = [];
   groupResults(results.filter((r) => r.open)).forEach((group, i) => {
@@ -110052,6 +110315,8 @@ function renderFindings(results) {
       lines.push(`   - ${printable(item.subject)}`);
       for (const e of item.evidence)
         lines.push(`       ${e.name.replaceAll("_", " ")}: ${printable(e.value)}`);
+      if (item.annotations.length > 0)
+        lines.push(`       finding key: ${item.finding_key}`, ...noteLines(item));
     }
   });
   return lines;
@@ -110080,6 +110345,22 @@ function renderCoverage(body, most = 3) {
   }
   return lines;
 }
+function coverageSummary(results) {
+  const lines = new Map;
+  for (const result of results.filter((r) => !r.open && r.confirmed_by === undefined)) {
+    const about = result.evidence.find((e) => e.name === "key")?.value ?? result.subject;
+    for (const e of result.evidence.filter((x) => x.name === "coverage")) {
+      lines.set(e.value, (lines.get(e.value) ?? new Set).add(about));
+    }
+  }
+  if (lines.size === 0)
+    return [];
+  return [
+    "",
+    "Coverage, for information: what was covered by other means or not covered. Nothing here is a problem or needs doing.",
+    ...[...lines].sort(([a], [b]) => compareCodePoints(a, b)).map(([line, about]) => `   - ${printable(line)}: ${[...about].sort().map(printable).join(", ")}`)
+  ];
+}
 function renderReport(body) {
   const { summary } = body;
   const lines = [];
@@ -110096,10 +110377,17 @@ function renderReport(body) {
   }
   lines.push(`Checked the whole project: ${summary.pass} result(s) passed.`);
   lines.push(...renderFindings(body.results));
+  lines.push(...coverageSummary(body.results));
   lines.push(...quotationNotes(body.results));
+  const dismissed = body.results.filter((r) => !r.open && r.annotations.some((a) => a.effect === "dismiss"));
+  if (dismissed.length > 0) {
+    lines.push("", "For information: a person dismissed these findings. The check still finds what it found.");
+    for (const r of dismissed)
+      lines.push(`   - ${printable(r.subject)} [${r.check}] ${r.message}`, ...noteLines(r));
+  }
   const confirmed = body.results.filter((r) => r.confirmed_by !== undefined);
   if (confirmed.length > 0) {
-    lines.push("", "For information: these could not be compared and a person confirmed the details. They are confirmed by the author, not verified.");
+    lines.push("", "For information: a person recorded what they saw for these details, which nothing else here shows. They are confirmed by the author, not verified.");
     for (const r of confirmed)
       lines.push(`   - ${r.subject} [${r.check}] review ${r.confirmed_by}`);
   }
@@ -110416,6 +110704,9 @@ function planReview(corpus, request) {
     throw new InvalidInput("A passage review names its passage with --passage.");
   if (indexes.length === 0)
     throw new InvalidInput("Say which pages or sections were reviewed with --pages <indexes>.");
+  const outside = request.flags.find((f) => !indexes.includes(f.index));
+  if (outside)
+    throw new InvalidInput(`A flag names index ${outside.index}, which is not among the reviewed pages (--pages).`);
   const pages = indexes.map((index) => {
     const sha = reviewDigest(text, request.scope, index);
     if (!sha)
@@ -112520,7 +112811,7 @@ import { resolve as resolve2 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.5",
+  version: "0.0.7",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
@@ -113530,6 +113821,7 @@ The plugin runs this through its launcher: sh scripts/stemma.sh <data directory>
   check [--changed | --all]
   excerpt --source <id> --pages <printed pages> | --passage <id>
   retire <record id...> --reason <text> --actor <kind>:<name> [--replaced-by <id>]
+  annotate --finding <finding key> --effect explain|dismiss --reason <text> --actor <kind>:<name>
   research list
 
 Options: --project <dir> (default: nearest ancestor holding stemma.json), --format text|json
@@ -113544,7 +113836,6 @@ var NOT_YET = new Set([
   "reviewed",
   "rounds",
   "support",
-  "annotate",
   "import",
   "export",
   "takeover",
@@ -113616,7 +113907,9 @@ var OPTIONS = {
   reconvert: FLAG,
   "refresh-lookups": FLAG,
   reason: STRING,
-  "replaced-by": STRING
+  "replaced-by": STRING,
+  finding: STRING,
+  effect: STRING
 };
 var COMMAND_OPTIONS = {
   "source convert": ["actor", "source", "origin", "acquired-at", "source-version", "held-at", "description", "image", "text-layer", "transcription", "method", "recognition", "tool", "tool-version", "page-map", "auto-pages", "page-numbers", "identity", "coverage-note", "note", "name"],
@@ -113634,6 +113927,7 @@ var COMMAND_OPTIONS = {
   resolve: ["actor", "via", "identifier"],
   excerpt: ["source", "passage", "pages"],
   retire: ["actor", "reason", "replaced-by"],
+  annotate: ["actor", "finding", "effect", "reason"],
   "record add": ["actor", "input"],
   check: ["changed", "all"],
   "research list": [],
@@ -113753,6 +114047,20 @@ function retire2(options, ids) {
 `);
   return reportRecords(options, validateFiles(after, retired), `${head}
 `, { retired: plan.map((r) => r.id), affected });
+}
+function annotateCommand(options) {
+  const { finding, effect, reason } = options;
+  if (!finding || !reason || effect !== "explain" && effect !== "dismiss")
+    throw usageError("annotate needs --finding <finding key>, --effect explain|dismiss, and --reason <text>.");
+  const actor = requireActor(options, "annotate records who wrote the note");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const made = planAnnotation(corpus, runChecks(corpus, tools()).body.results, { finding, effect, reason, actor, now: new Date, token: randomToken });
+  writeProjectFile(root, made.path, made.text);
+  const head = effect === "dismiss" ? `Recorded ${made.id}: ${made.finding.check} on ${made.finding.subject} is dismissed while what it describes is unchanged. \`check\` lists it with the reason.` : `Recorded ${made.id}: it explains ${made.finding.check} on ${made.finding.subject}. The finding stays open and is shown with the reason.`;
+  return reportRecords(options, validateFiles(openCorpus(root), new Set([made.path])), `${head}
+  ${made.path}
+`, { added: { id: made.id, path: made.path } });
 }
 function recordAdd(options, kind) {
   if (!kind || !Object.hasOwn(KINDS, kind))
@@ -113888,6 +114196,9 @@ function dispatch(command, rest, options) {
       return excerpt2(options);
     case "retire":
       return retire2(options, rest);
+    case "annotate":
+      only(0);
+      return annotateCommand(options);
     case "resolve":
       return resolveCommand(options, rest);
     case "coverage":
