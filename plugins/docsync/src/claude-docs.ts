@@ -650,6 +650,7 @@ export function docOps(
     let bestRatio = 0.8;
     for (const m of added) {
       if (landed.has(m) || nearly.has(m) || !sameShape(id, m)) continue;
+      if (!alnum(docWords(id)) || !alnum(fileWords(m))) continue;
       const r = likeness(alnum(docWords(id)), alnum(fileWords(m)));
       if (r >= bestRatio) [best, bestRatio] = [m, r];
     }

@@ -91,12 +91,20 @@ including one conflict resolved for git; a comment stayed in place; and `rebind`
 confirmed that the doc then equalled the file. Those reads are the test
 fixtures. The doc edits in it were made through the docs tools.
 
+`tests/draftsync.test.ts` ports draftsync's tests as of HELIX commit 431c886,
+under their own names: 92 of 97. The other five test the edit hook and HELIX's
+own table script, and the file says why for each. It replays HELIX's recorded
+reads, among them edits made in the Docs interface by three editors and the
+reads around a live write-back. Where an expectation differs by design, the test
+says so.
+
 The merge and word patcher gave the same results as draftsync 0.25.0 on 4,379
 randomized three-way merges, 995 of them with conflicts. That comparison needs
 Python and is not part of the repository's tests.
 
-Not tested: typing in the Docs interface, including whether it changes straight
-quotation marks inside markers; Codex; Windows.
+Not tested: typing a manuscript in the Docs interface, including whether it
+changes straight quotation marks inside markers; Codex; Windows. HELIX's
+interface recording holds no manuscript markers.
 
 ## Limits
 
