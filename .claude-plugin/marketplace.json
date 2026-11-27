@@ -1,0 +1,15 @@
+{
+  "name": "documentdrivendx",
+  "description": "Claude plugins from DocumentDrivenDX",
+  "owner": {
+    "name": "DocumentDrivenDX",
+    "url": "https://github.com/DocumentDrivenDX"
+  },
+  "plugins": [
+    {
+      "name": "stemma",
+      "description": "Research and write books with citations checked by scripts against your own stored copies, with plain-language reports.",
+      "source": "./plugins/stemma"
+    }
+  ]
+}
