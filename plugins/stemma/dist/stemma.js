@@ -18934,7 +18934,7 @@ var require_citeproc_commonjs = __commonJS(function(exports, module) {
 
 // packages/cli/src/main.ts
 import { existsSync as existsSync8, readFileSync as readFileSync12 } from "fs";
-import { join as join15, resolve as resolve11 } from "path";
+import { join as join15, resolve as resolve12 } from "path";
 import { parseArgs } from "util";
 
 // packages/records/src/json.ts
@@ -19358,6 +19358,51 @@ var SOURCE_DIRECTORY_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
 function slugOf(key) {
   const slug = key.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
   return SOURCE_DIRECTORY_NAME.test(slug) && !/^(con|prn|aux|nul|com\d|lpt\d)$/.test(slug) ? slug : undefined;
+}
+
+// packages/records/src/locations.ts
+var LABEL = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} ._'()-]{0,79}$/u;
+function isLocationLabel(value) {
+  return LABEL.test(value);
+}
+function isLocationAddress(value) {
+  if (!/^https?:\/\//i.test(value))
+    return false;
+  try {
+    const url = new URL(value);
+    return url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+function hasCredentials(value) {
+  try {
+    const url = new URL(value);
+    return url.username !== "" || url.password !== "";
+  } catch {
+    return false;
+  }
+}
+function badLocations(locations) {
+  const seen = new Set;
+  return locations.flatMap((entry, i) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      return [];
+    const { kind, url, label } = entry;
+    const kept = kind === "private";
+    const name = kept ? label : url;
+    const shaped = kept ? url === undefined && typeof label === "string" && isLocationLabel(label) : label === undefined && typeof url === "string" && isLocationAddress(url);
+    const key = `${kept ? "label" : "url"} ${String(name)}`;
+    const repeated = seen.has(key);
+    seen.add(key);
+    return shaped && !repeated ? [] : [i];
+  });
+}
+function addressesOf(upstream) {
+  const locations = Array.isArray(upstream.locations) ? upstream.locations : [];
+  const listed = locations.flatMap((l) => typeof l.url === "string" ? [{ url: l.url, kind: String(l.kind) }] : []);
+  const first = typeof upstream.url === "string" && upstream.url !== "" ? [{ url: upstream.url }] : [];
+  return [...first, ...listed].filter((a, i, all) => all.findIndex((b) => b.url === a.url) === i);
 }
 
 // packages/records/src/schema.generated.ts
@@ -23447,6 +23492,48 @@ var TYPES = {
       required: true
     }
   },
+  LocationComparison: {
+    at: {
+      type: "date-time",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    }
+  },
+  UpstreamLocation: {
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "publisher",
+        "web_archive",
+        "archive",
+        "private"
+      ]
+    },
+    url: {
+      type: "string"
+    },
+    label: {
+      type: "string"
+    },
+    added: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    compared: {
+      type: {
+        value: "LocationComparison"
+      }
+    },
+    note: {
+      type: "string"
+    }
+  },
   Upstream: {
     schema: {
       type: "string",
@@ -23523,6 +23610,12 @@ var TYPES = {
     identifiers: {
       type: {
         value: "Identifier"
+      },
+      many: true
+    },
+    locations: {
+      type: {
+        value: "UpstreamLocation"
       },
       many: true
     },
@@ -24831,6 +24924,9 @@ var REFERENCES = {
   "upstream.retired.stamp.import": [
     "import_batch"
   ],
+  "upstream.locations.added.import": [
+    "import_batch"
+  ],
   "upstream.legacy.import": [
     "import_batch"
   ],
@@ -24990,8 +25086,20 @@ function checkRules(record, problems) {
     if (typeof value === "number" && value < 0)
       problems.push(invalid("bad_size", field));
   };
-  if (record.kind === "upstream")
+  if (record.kind === "upstream") {
     size(record.size, "/size");
+    if (Array.isArray(record.locations))
+      for (const i of badLocations(record.locations))
+        problems.push(invalid("bad_location", `/locations/${i}`));
+    if (typeof record.url === "string" && hasCredentials(record.url))
+      problems.push(invalid("bad_location", "/url"));
+    if (Array.isArray(record.auxiliary)) {
+      record.auxiliary.forEach((aux, i) => {
+        if (isObject(aux) && typeof aux.url === "string" && hasCredentials(aux.url))
+          problems.push(invalid("bad_location", `/auxiliary/${i}/url`));
+      });
+    }
+  }
   if (record.kind === "source_text" && isObject(record.original)) {
     const { form, files, description, held_at: held } = record.original;
     const list = Array.isArray(files) ? files : [];
@@ -25309,8 +25417,10 @@ function loadText(directory, files, manifest) {
     } else
       strays.push(file);
   }
-  const usable = manifest.state === "ok" && !blocking(manifest.problems) && damage.length === 0 && partFiles.every((f) => f.state === "ok" && !blocking(f.problems));
-  return { text: { manifest, directory, parts, damage, usable }, partFiles, strays };
+  const sound = manifest.state === "ok" && !blocking(manifest.problems);
+  const usable = sound && damage.length === 0 && partFiles.every((f) => f.state === "ok" && !blocking(f.problems));
+  const notHeld = sound && entries.length > 0 && partFiles.length === 0 && damage.length === entries.length && damage.every((d) => d.code === "part_missing");
+  return { text: { manifest, directory, parts, damage, usable, notHeld }, partFiles, strays };
 }
 function loadSources(sources) {
   const directories = new Map;
@@ -25589,7 +25699,9 @@ var TEMPLATES = {
   "source.held:no_text": explain("A cited source's files hold no text, so this citation is unchecked.", HELD_WHY, ["Capture a copy of the source whose text can be read, or supply a transcription."], ["capture_source"]),
   "source.held:record_unreadable": explain("Whether this cited source's text is here could not be checked: a source file's manifest cannot be read.", HELD_WHY, ["Repair the unreadable file first (see the record.valid finding), then run `check` again."]),
   "source.held:source_damaged": explain("A cited source has a source file that is damaged, so it is not used and this citation is unchecked.", HELD_WHY, ["See the source.pages and record.valid findings on that source file. Restore it from git, or record your own edit with `source seal`."], ["restore_source"]),
+  "source.held:text_not_held": explain("The text of this cited source is not in this copy of the project, so this citation could not be checked.", HELD_WHY, ["See the source.pages finding for that source file. `ingest --fetch` fetches the original again and writes the text if it converts to exactly what the manifest records; `ingest --originals <dir>` does the same from a copy you have."], ["capture_source"]),
   "source.held:check_error": CHECK_FAILED,
+  "source.pages:not_held": explain("The source's text is not held here: its manifest is present and none of its page or section files is. Nothing shows that anything is damaged.", "Quotations, pages and anything else that rests on this text cannot be checked in this copy of the project.", ["Fetch it again with `ingest --fetch --actor <kind>:<name>`, which asks the recorded addresses, or give a copy of the original with `ingest --originals <dir>`. The text is written only if it is exactly what the manifest records. If you keep the text elsewhere, or it was typed or recognized by another tool, copy it back."], ["capture_source"]),
   "source.pages:part_missing": explain("A page or section file that the manifest lists is missing.", STRUCTURE_WHY, ["Restore the file from git."], ["restore_source"]),
   "source.pages:part_edited": explain("A page or section file differs from the digest its manifest records.", STRUCTURE_WHY, ["If you meant to edit it, record the edit with `source seal <text id> --actor person:<name>`. Otherwise restore it from git."], ["restore_source"]),
   "source.pages:part_unlisted": explain("A page or section file is in the source directory but not in its manifest.", STRUCTURE_WHY, ["Remove the file, or convert the source again."], ["restore_source"]),
@@ -25610,6 +25722,7 @@ var TEMPLATES = {
   "source.original:original_not_upstream": explain("A source file was converted from an original that none of the source's upstream records names.", ORIGINAL_WHY, ["Check which original is right. Record its upstream (`ingest --plan`), or retire this source file."]),
   "source.original:conversion_differs": explain("A fresh conversion of the original does not give the committed text, after a person's corrections are undone.", ORIGINAL_WHY, ["Look at the differing readings. If a person edited the words, mark the change as a correction; otherwise restore the file, or convert the original again and retire this one."]),
   "source.original:comparison_stale": explain("The text or the tools changed after the last fresh conversion was compared, so it no longer says anything.", ORIGINAL_WHY, ["Run `source verify <text id> --original <file>`, or `ingest` with the originals."], ["verify_original"]),
+  "source.original:text_not_held": explain("A source file's text is not here, so it was not compared with its original.", ORIGINAL_WHY, ["See the source.pages finding for this source file."]),
   "source.original:check_error": CHECK_FAILED,
   "claim.complete:claim_incomplete": explain("A claim in the ledger is incomplete: the evidence names what is missing of a note behind it, a confidence level and a reason.", CLAIM_WHY, ["For a missing note, record a note on the source passage and link it to the claim with an attestation; a passage linked directly is not a note, and a retired note or attestation no longer counts, nor does one that breaks a rule (see the record.valid findings). For a missing confidence level (low, medium or high) or reason, add them to the claim. Stemma has no command that edits a record: change the claim's file and run `fmt` on it. If you no longer hold the claim, retire it. Writing can carry on meanwhile, and a claim that is rightly left as it is, such as your own thesis, can be explained or dismissed."]),
   "claim.complete:record_unreadable": explain("Whether a note lies behind this claim could not be checked: a record that could link it to one cannot be read. Any other missing part is named in the evidence.", CLAIM_WHY, ["Repair the files named in the evidence (see the record.valid findings), then run `check` again. Add whatever else the evidence names as missing."]),
@@ -25617,7 +25730,7 @@ var TEMPLATES = {
   "source.changed:depends_on_retired": explain("This rests on a source file or source that has since been replaced or retired.", CHANGED_WHY, ["Compare what you took from it with what replaced it, then correct or retire this item if it no longer holds. Stemma cannot yet record that you have looked, so the finding stays listed."]),
   "source.changed:text_changed": explain("The text of a page or section changed after a passage this rests on was captured from it.", CHANGED_WHY, ["Look at the page, capture the passage again, and retire the old passage and anything copied from it that no longer holds."]),
   "source.changed:source_details_changed": explain("The source's details changed after a passage this rests on was captured.", CHANGED_WHY, ["Check that the passage still belongs to the source as it is now recorded, and capture it again if it does."]),
-  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: something it depends on cannot be read.", CHANGED_WHY, ["Repair the unreadable file first (see the record.valid and source.pages findings), then run `check` again."]),
+  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: something it depends on cannot be read.", CHANGED_WHY, ["See the record.valid and source.pages findings: repair the file, or fetch text that is not held here, then run `check` again."]),
   "source.changed:retired_text_not_followed": explain("A source file of this source was retired, and a citation with no record does not say whether it was written before or after.", CHANGED_WHY, ["Nothing needs doing: this is a limit of what was covered. Quotations, pages and locators are compared with the current text. What the sentence says in your own words is not."]),
   "source.changed:check_error": CHECK_FAILED,
   "quote.present:near_match": explain("A quotation is not in the source's text as written. A passage close to it is; both are shown.", QUOTE_WHY, ["Compare the two texts, and look at the page itself, since converted or recognized text can be wrong. If your quotation is wrong, capture the passage by its address so the words are copied. An omission, an added word, a change of capitals or punctuation, an ellipsis or a bracketed edit all count as differences."], ["capture_passage"]),
@@ -25640,9 +25753,11 @@ var TEMPLATES = {
   "locator.extent:no_extent": explain("A locator could not be checked: no extent is recorded for it, and no source file has its numbering.", UNLOCATED_WHY, ["For pages, label your source file's pages; a source with no pages cannot check a page number. For another kind of locator, record the work's extent on the source, taken from the work itself."], ["relabel"]),
   "locator.extent:unparsable_locator": explain("A locator is not written in a form that can be compared with the work's pages or extent.", UNLOCATED_WHY, ["Write it as the printed label, or as a range with both ends in full, such as 41-43. Otherwise check it by hand."]),
   "locator.extent:record_unreadable": explain("A locator could not be checked: a source file of this source cannot be read or is damaged.", UNLOCATED_WHY, ["See the record.valid and source.pages findings, repair the source file, then run `check` again."]),
+  "locator.extent:text_not_held": explain("A locator could not be checked: the text of this source is not in this copy of the project.", UNLOCATED_WHY, ["See the source.pages finding for that source file, and fetch its text again."]),
   "locator.extent:check_error": CHECK_FAILED,
   "meta.source:mismatch": explain("The source record disagrees with what the captured copy states about itself.", META_WHY, ["Compare both values with the title page of the work. Correct the record if it is wrong; if the copy is a different edition or a misdescribed file, capture the right one."], ["correct_record", "capture_source"]),
   "meta.source:source_damaged": explain("The source's details could not be compared with a copy: its source file is damaged.", META_WHY, ["See the source.pages finding and repair the source file."], ["restore_source"]),
+  "meta.source:text_not_held": explain("The source's details could not be compared with a copy: its text is not in this copy of the project.", META_WHY, ["See the source.pages finding for that source file, and fetch its text again."], ["capture_source"]),
   "meta.source:not_found_in_copy": explain("Some of the source's details are shown neither by the copy's title page text nor by a saved catalogue record, and nothing contradicts them.", META_WHY, ["Nothing needs doing: this is a limit of what was covered. A saved lookup or a copy with a clearer text would corroborate more. The author may also record what the title page shows (`review add --scope source_details`)."]),
   "meta.source:nothing_to_compare": explain("The source record has no title yet, so its details could not be compared with the copy.", META_WHY, ["Nothing needs doing. Once a title is recorded, it is compared."]),
   "meta.source:check_error": CHECK_FAILED,
@@ -25699,6 +25814,7 @@ var PROBLEMS = {
   bad_part: "the part is not in the source file format",
   model_verification: "a model's review can only flag; it is never a person's verification",
   response_digest_mismatch: "the saved response does not match its digest",
+  bad_location: "a location is an http or https address with no user name or password, or, for a private copy, a name that is no path or address; none is listed twice",
   bad_address: "a passage address needs, for each part, a start before its end",
   bad_binding: "an annotation binds a sentence and its source, or one record, never both",
   note_without_passage: "an extract or paraphrase note names no passage, so nothing shows where in its source it comes from; capture the passage (`passage capture`) and name it in `passages`, or make the note a comment if it is a remark of your own",
@@ -26305,6 +26421,9 @@ class SourceTexts {
     this.bySource ??= new Map([...grouped([...this.corpus.texts].filter(([, t]) => !isRetired(t.manifest.data)), ([, t]) => [t.manifest.data.source])].map(([of, list]) => [of, list.sort(([, a], [, b]) => a.directory < b.directory ? -1 : 1).map(([id]) => id)]));
     return [...this.bySource.get(source) ?? []];
   }
+  notHeld(ids) {
+    return ids.length > 0 && ids.every((id) => this.corpus.texts.get(id)?.notHeld === true);
+  }
   of(source) {
     const ids = this.idsOf(source);
     const views = ids.flatMap((id) => this.view(id) ?? []);
@@ -26447,10 +26566,13 @@ function coverageOf(corpus, text, tools = {}) {
     reviewed_by_person: whole.size,
     stale_reviews: stale,
     flags,
-    runs
+    runs,
+    ...text.notHeld ? { not_held: true } : {}
   };
 }
 function coverageWords(c) {
+  if (c.not_held)
+    return "its text is not held here";
   const compared = c.runs.filter((r) => r.current).map((r) => `${r.method === "reconversion" ? "fresh conversion" : "second text"}: ${r.parts - r.differing_parts} of ${r.parts} parts agree`);
   return [
     `${c.reviewed_by_person} of ${c.parts} parts reviewed whole by a person`,
@@ -27540,7 +27662,7 @@ function holding(texts, source) {
   }
   const damaged = ids.filter((id) => !texts.view(id));
   if (damaged.length > 0) {
-    return { outcome: "unverifiable", reason: "source_damaged", evidence: damaged.map((id) => at2("source_text", corpus.texts.get(id).manifest.path)) };
+    return { outcome: "unverifiable", reason: texts.notHeld(damaged) ? "text_not_held" : "source_damaged", evidence: damaged.map((id) => at2("source_text", corpus.texts.get(id).manifest.path)) };
   }
   const evidence = [];
   let held = false;
@@ -27716,8 +27838,11 @@ function judgeLocator(texts, source, locator) {
     return { ...overall(wheres, "outside_extent"), evidence: [shown] };
   }
   const ids = texts.idsOf(String(source.id));
-  if (manifestsUnread(texts.corpus) || ids.some((id) => !texts.view(id)))
+  const unused = ids.filter((id) => !texts.view(id));
+  if (manifestsUnread(texts.corpus))
     return unverifiable("record_unreadable");
+  if (unused.length > 0)
+    return unverifiable(texts.notHeld(unused) ? "text_not_held" : "record_unreadable");
   const mapped = TERMS.has(term) ? mappedPlaces(texts, String(source.id), term) : undefined;
   if (!mapped || mapped.labels.size === 0) {
     const unpaged = (term === "page" || term === "folio") && ids.length > 0 && ids.every((id) => !texts.view(id).paged);
@@ -28205,8 +28330,9 @@ function excerptPages(corpus, source, range) {
   if (texts.idsOf(source).length === 0)
     throw new InvalidInput(`The source ${source} has no source file. Capture its text first.`);
   const { views } = texts.of(source);
-  if (views.length === 0)
-    throw new InvalidInput("The source file of this source is damaged. `check` explains why.");
+  if (views.length === 0) {
+    throw new InvalidInput(texts.notHeld(texts.idsOf(source)) ? "The text of this source is not held here. `check` explains how to fetch it again." : "The source file of this source is damaged. `check` explains why.");
+  }
   const pagesFor = (view, label) => view.parts.filter((p) => p.label === label);
   const created = (v) => String(v.loaded.manifest.data.created.at);
   const complete = views.filter((v) => labels.every((l) => pagesFor(v, l).length > 0)).sort((a, b) => created(b).localeCompare(created(a)));
@@ -28425,6 +28551,7 @@ function planReviewed(corpus, request) {
 
 // packages/core/src/annotations.ts
 var NOT_DISMISSIBLE = new Set(["source.held", "record.valid", "build.uncommitted"]);
+var dismissible = (found) => !NOT_DISMISSIBLE.has(found.check) && !(found.check === "source.pages" && found.reason_code === "not_held");
 function bindingOf(corpus, found) {
   if (found.sentence) {
     const source = found.source === undefined ? undefined : corpus.byId.get(found.source)?.data;
@@ -28470,7 +28597,7 @@ function annotate(corpus, results) {
     });
     if (applying.length === 0)
       return found;
-    const dismissed = !NOT_DISMISSIBLE.has(found.check) && applying.some((n) => n.effect === "dismiss" && n.person);
+    const dismissed = dismissible(found) && applying.some((n) => n.effect === "dismiss" && n.person);
     return { ...found, annotations: applying.map(({ person: _p, ...n }) => n), open: found.open && !dismissed };
   });
 }
@@ -28483,8 +28610,8 @@ function planAnnotation(corpus, results, request) {
   if (request.effect === "dismiss") {
     if (request.actor.kind !== "person")
       throw new InvalidInput("Only a person can dismiss a finding. A model or script records what it found with --effect explain, and the finding stays open.");
-    if (NOT_DISMISSIBLE.has(found.check))
-      throw new InvalidInput(`A ${found.check} finding can be explained, not dismissed.`);
+    if (!dismissible(found))
+      throw new InvalidInput(`${found.reason_code === "not_held" ? "A finding that a source's text is not here" : `A ${found.check} finding`} can be explained, not dismissed.`);
   }
   const id = `${KINDS.annotation.prefix}${request.token()}`;
   const stamp = { at: request.now.toISOString().replace(/\.\d+Z$/, "Z"), by: { ...request.actor } };
@@ -28923,7 +29050,7 @@ function sourceMetaResults(corpus, texts = new SourceTexts(corpus)) {
     const base = [location2("source_file", source.path), keyOf(source)];
     const { views } = texts.of(idOf(source));
     if (views.length === 0)
-      return result({ ...shared(check, source), outcome: "unverifiable", reason: "source_damaged", evidence: base });
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: texts.notHeld(texts.idsOf(idOf(source))) ? "text_not_held" : "source_damaged", evidence: base });
     const record = describe(source.data);
     const judged = views.map((v) => againstCopy(record, v)).sort((a, b) => score(a.statuses) - score(b.statuses))[0];
     const evidence = [...base, ...judged.evidence];
@@ -29136,6 +29263,22 @@ function pageResults(corpus) {
   const check = "source.pages";
   return activeTexts(corpus).flatMap(([id, text]) => {
     const parts = meta4("parts", `${text.parts.length} ${text.manifest.data.paged === true ? "page files" : "section files"} present`);
+    if (text.notHeld) {
+      const passages = new Set(activeWhere(corpus, "passage", "text", id).map(idOf));
+      const citations = active(corpus, "citation").filter((c) => passages.has(String(c.data.passage))).length;
+      return [result({
+        ...common(check, text),
+        outcome: "unverifiable",
+        reason: "not_held",
+        locus: id,
+        evidence: [
+          at3("source_text", text.manifest.path),
+          meta4("parts", `none of the ${text.damage.length} listed ${text.manifest.data.paged === true ? "page files" : "section files"} is here`),
+          meta4("rests_on_it", `${passages.size} passage(s) and ${citations} citation record(s) taken from this text cannot be checked`),
+          meta4("fetch_again", `ingest --fetch --actor <kind>:<name>, or ingest --originals <dir> when you have the original`)
+        ]
+      })];
+    }
     if (text.damage.length > 0) {
       return text.damage.map((d) => result({
         ...common(check, text),
@@ -29288,6 +29431,16 @@ function originalResults(corpus, tools) {
       return [result({ ...shared, outcome: "fail", reason: "original_not_upstream", locus: `${id}#upstream`, evidence: [...evidence, ...upstreams.map((u) => at4("upstream_file", u.path))] })];
     }
     const upstreamWords = upstreams.length > 0 ? [meta5("upstream", "the original's digest matches an upstream record")] : [];
+    if (text.notHeld) {
+      return [result({
+        ...shared,
+        outcome: "unverifiable",
+        reason: "text_not_held",
+        locus: id,
+        coverage: true,
+        evidence: [...evidence, ...upstreamWords, meta5("coverage", "not compared with its original: its text is not here")]
+      })];
+    }
     if (runs.length === 0) {
       return [result({ ...shared, outcome: "pass", locus: id, evidence: [...evidence, ...upstreamWords, meta5("fresh_conversion", "none recorded: this says nothing about the text against the original")] })];
     }
@@ -29947,8 +30100,9 @@ function capturePassage(corpus, request) {
   if (isRetired(corpus.texts.get(address.text).manifest.data))
     throw new InvalidInput(`The source file ${address.text} is retired.`);
   const view = texts.view(address.text);
-  if (!view)
-    throw new InvalidInput("That source file is damaged, so nothing is copied from it. `check` explains why.");
+  if (!view) {
+    throw new InvalidInput(texts.notHeld([address.text]) ? "That source file's text is not held here, so nothing can be copied from it. `check` explains how to fetch it again." : "That source file is damaged, so nothing is copied from it. `check` explains why.");
+  }
   const { start, end } = resolveSpan(view, address);
   const exact = view.streams[address.stream].text.slice(start, end);
   if (!/\S/u.test(exact))
@@ -30594,6 +30748,14 @@ function directoryFor(corpus, wanted, key, id) {
   }
   return `sources/${id}`;
 }
+function partTexts(converted) {
+  return converted.parts.map((part) => {
+    const front = partFront(part, converted.paged, converted.method);
+    assertValid("SourcePage", "source_page", canonical(front));
+    const text = serializePart(front, part.blocks);
+    return { index: part.index, file: partFile(converted.paged, part.index), sha256: fileDigest(text), text };
+  });
+}
 function planSourceText(corpus, request) {
   const { actor, now, token, converted, original } = request;
   if (actor.kind === "model" && converted.method === "manual") {
@@ -30617,14 +30779,10 @@ function planSourceText(corpus, request) {
   const directory = directoryFor(corpus, request.name, named?.citation_key, id);
   const files = [];
   let size = 0;
-  const entries = converted.parts.map((part) => {
-    const front = partFront(part, converted.paged, converted.method);
-    assertValid("SourcePage", "source_page", canonical(front));
-    const text = serializePart(front, part.blocks);
+  const entries = partTexts(converted).map(({ index, file, sha256, text }) => {
     size += Buffer.byteLength(text);
-    const file = partFile(converted.paged, part.index);
     files.push({ path: `${directory}/${file}`, text });
-    return { index: part.index, file, sha256: fileDigest(text) };
+    return { index, file, sha256 };
   });
   if (size > LIMITS.text_bytes)
     throw new InvalidInput("The converted text is larger than the limit of 100 MiB.");
@@ -31487,6 +31645,9 @@ function sourceHistory(corpus, name) {
     const kind = String(data.kind);
     if (kind === "upstream") {
       add(data.created, id, `original captured: sha256 ${String(data.sha256).slice(0, 12)}, ${String(data.size)} bytes, ${String(data.media_type)}, got ${String(data.retrieved_at)}`, str(data.url) ?? str(data.note));
+      for (const location of list5(data.locations)) {
+        add(location.added, id, `location recorded: ${String(location.kind)}`, str(location.url) ?? str(location.label));
+      }
     } else if (kind === "source_text") {
       const original = isObject(data.original) ? data.original : {};
       const conversion = isObject(data.conversion) ? data.conversion : {};
@@ -31511,6 +31672,68 @@ function sourceHistory(corpus, name) {
   if (isObject(file.data.retired))
     add(file.data.retired.stamp, source, `retired this source: ${String(file.data.retired.reason)}`);
   return { source, events: events.map((e, i) => ({ e, i })).sort((a, b) => Date.parse(a.e.at) - Date.parse(b.e.at) || a.i - b.i).map((x) => x.e) };
+}
+// packages/core/src/locations.ts
+var LOCATION_KINDS = ["publisher", "web_archive", "archive", "private"];
+var upstreams = (corpus) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "upstream" && !isRetired(f.data));
+function findUpstream(corpus, name) {
+  if (isRecordId("upstream", name)) {
+    const found = upstreams(corpus).find((f) => idOf(f) === name);
+    if (!found)
+      throw new InvalidInput(`No readable upstream record in effect has the ID ${name}.`);
+    return found;
+  }
+  const source = idOf(findSource(corpus, name));
+  const mine = upstreams(corpus).filter((f) => f.data.source === source);
+  if (mine.length === 1)
+    return mine[0];
+  throw new InvalidInput(mine.length === 0 ? `The source ${name} has no upstream record, so there is no original to give a location of. Record it first (\`source capture\`, or an \`ingest\` plan).` : `The source ${name} has ${mine.length} upstream records, one for each original. Name the one meant: ${mine.map((f) => `${idOf(f)} (sha256 ${String(f.data.sha256).slice(0, 12)})`).join(", ")}.`);
+}
+function planLocation(corpus, request) {
+  const file = findUpstream(corpus, request.upstream);
+  const data = file.data;
+  if (!file.formattable)
+    throw new InvalidInput(`${file.path} holds values that rewriting would change. Correct it first.`);
+  const { kind, url, label } = request;
+  if (kind === "private") {
+    if (url !== undefined || label === undefined || !isLocationLabel(label)) {
+      throw new InvalidInput("A private copy is recorded by a name you choose, never by a path or an address: up to 80 letters, digits, spaces and . _ ' ( ) -, starting with a letter or digit.");
+    }
+  } else if (label !== undefined || url === undefined || !isLocationAddress(url)) {
+    throw new InvalidInput("A location that is not private is an http or https address with no user name or password in it.");
+  }
+  const at = request.now.toISOString().replace(/\.\d+Z$/, "Z");
+  const list = Array.isArray(data.locations) ? data.locations.filter(isObject) : [];
+  const index = list.findIndex((l) => kind === "private" ? l.label === label : l.url === url);
+  const held = list[index];
+  const notes = [];
+  const compared = request.gave === undefined ? undefined : { at, sha256: request.gave };
+  let next;
+  if (!held) {
+    next = {
+      kind,
+      ...url !== undefined ? { url } : {},
+      ...label !== undefined ? { label } : {},
+      added: { at, by: { ...request.actor } },
+      ...compared ? { compared } : {},
+      ...request.note ? { note: request.note } : {}
+    };
+  } else {
+    if (held.kind !== kind)
+      notes.push(`It is already listed with the kind ${String(held.kind)}, which was kept.`);
+    if (request.note && held.note !== request.note)
+      notes.push("It is already listed; its recorded note was kept.");
+    const before = isObject(held.compared) ? held.compared.sha256 : undefined;
+    next = compared && before !== compared.sha256 ? { ...held, compared } : held;
+  }
+  const result = isObject(next.compared) ? next.compared.sha256 === data.sha256 ? "same" : "different" : "not_compared";
+  const shared = { upstream: idOf(file), source: String(data.source), added: !held, bytes: result, notes };
+  if (next === held)
+    return shared;
+  const locations = held ? list.map((l, i) => i === index ? next : l) : [...list, next];
+  const text = canonical({ ...data, locations, changed: { at, by: { ...request.actor } } });
+  assertValid("Upstream", "upstream", text);
+  return { ...shared, record: { id: idOf(file), path: file.path, text } };
 }
 // packages/core/src/states.ts
 var COMPUTED_STATES = ["unreviewed", "retired_link", "annotated", "open_finding"];
@@ -32895,6 +33118,11 @@ var FETCH_LIMITS = { bytes: 200 * 1024 * 1024, milliseconds: 300000, redirects: 
 class FetchRefused extends Error {
 }
 var privateAddress = (address) => {
+  const embedded = /^(?:::(?:ffff:(?:0:)?)?|64:ff9b::)([0-9a-f]{1,4}):([0-9a-f]{1,4})$/i.exec(address);
+  if (embedded) {
+    const [high, low] = [parseInt(embedded[1], 16), parseInt(embedded[2], 16)];
+    return privateAddress(`${high >> 8}.${high & 255}.${low >> 8}.${low & 255}`);
+  }
   const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.\d+\.\d+$/i.exec(address);
   if (v4) {
     const [a, b] = [Number(v4[1]), Number(v4[2])];
@@ -33484,7 +33712,7 @@ import { resolve as resolve3 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.18",
+  version: "0.0.19",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
@@ -35507,6 +35735,10 @@ function sourceSeal(options, text) {
 `);
   return 0;
 }
+function canConvertAgain(conversion, media) {
+  const used = conversion.tools.map((t) => String(t.name));
+  return media === "application/pdf" ? used.includes("pdfjs-dist") : !IMAGE_TYPES.includes(media) && ["born_text", "markup"].includes(String(conversion.method));
+}
 async function reconvert(root, corpus, id, original, actor, standing) {
   const text = corpus.texts.get(id);
   if (!text)
@@ -35518,9 +35750,7 @@ async function reconvert(root, corpus, id, original, actor, standing) {
     throw new InvalidInput(`That file's digest, ${original.sha256}, is not the original this source file was converted from.`);
   }
   const conversion = data.conversion;
-  const used = conversion.tools.map((t) => String(t.name));
-  const reconvertible = original.media_type === "application/pdf" ? used.includes("pdfjs-dist") : !IMAGE_TYPES.includes(original.media_type) && ["born_text", "markup"].includes(String(conversion.method));
-  if (!reconvertible)
+  if (!canConvertAgain(conversion, original.media_type))
     return { reconvertible: false };
   const labels = new Map(text.parts.map((p) => [p.index, {
     status: String(p.front.label_status),
@@ -35710,14 +35940,17 @@ function passageFind(options, words) {
   const root = requireProject(options);
   const corpus = openCorpus(root);
   const found = findPassages(corpus, options.source, words);
-  const unusable = new SourceTexts(corpus).of(options.source).unusable;
+  const texts = new SourceTexts(corpus);
+  const unusable = texts.of(options.source).unusable;
   const lines = found.length === 0 ? ["The words were not found in this source's text."] : found.flatMap((f) => [
     `${f.address}`,
     `  ${f.places.join("; ")}; ${f.match} match${f.locator ? `; ${f.locator.label} ${f.locator.value}` : "; no locator can be copied here"}`,
     `  quoted data: ${printable(f.quotation)}`
   ]);
-  if (unusable > 0)
-    lines.push(`${unusable} source file(s) of this source are damaged and were not searched.`);
+  if (unusable > 0) {
+    const absent = texts.idsOf(options.source).filter((id) => texts.notHeld([id])).length;
+    lines.push(`${unusable} source file(s) of this source ${absent === unusable ? "have no text here" : "are damaged or have no text here"} and were not searched.`);
+  }
   emit(options, { found, unusable }, `${lines.join(`
 `)}
 `);
@@ -35977,6 +36210,8 @@ var LOCATION_FIELDS = new Set([
   "Original.obtained_from",
   "Upstream.url",
   "Upstream.note",
+  "UpstreamLocation.url",
+  "UpstreamLocation.label",
   "AuxiliaryFile.url",
   "Resolution.url",
   "CandidateOrigin.location",
@@ -44413,6 +44648,7 @@ function render2(corpus, texts, spec) {
   const container = containerOf(corpus, cited);
   const pieces = [];
   const locators = [];
+  const labels = new Set;
   const provenance = [];
   spec.passages.forEach((segment, n) => {
     const passage = corpus.byId.get(segment.passage)?.data;
@@ -44424,6 +44660,10 @@ function render2(corpus, texts, spec) {
     const at = textAt(texts, passage);
     if (at.state === "changed")
       throw new ReportError(`${spec.id}: page ${at.index} of ${String(passage.text)} has changed since ${segment.passage} was captured`);
+    if (at.state === "unavailable") {
+      const why = texts.notHeld([String(passage.text)]) ? "it is not held here" : "a part of it is missing or damaged";
+      throw new ReportError(`${spec.id}: the text of ${String(passage.text)} cannot be read, so ${segment.passage} cannot be copied from it; ${why}, as \`check\` explains`);
+    }
     if (at.state !== "ok" || !isObject(passage.quote) || at.text !== passage.quote.exact) {
       throw new ReportError(`${spec.id}: the source file no longer gives the text ${segment.passage} captured`);
     }
@@ -44441,6 +44681,7 @@ function render2(corpus, texts, spec) {
       pieces.push(segment.join ?? " ");
     pieces.push(at.text);
     locators.push(String(passage.locator.value));
+    labels.add(String(passage.locator.label));
   });
   let text = pieces.join("");
   const keep = new Set(spec.keep_hyphens ?? []);
@@ -44467,10 +44708,15 @@ function render2(corpus, texts, spec) {
     text = text.replaceAll(word, `*${word}*`);
   }
   const seen = [...new Set(locators)];
+  const [label = "page", ...others] = [...labels];
+  if (others.length > 0)
+    throw new ReportError(`${spec.id}: its passages are located by ${[label, ...others].join(" and ")}, which one citation cannot give`);
+  if (spec.note && label !== "page")
+    throw new ReportError(`${spec.id}: "note" marks a note on a page, and this passage is located by ${label}`);
   let locator = seen.length === 1 ? seen[0] : pageRange(seen[0], seen.at(-1));
   if (spec.note)
     locator += /\d$/.test(locator) ? "n" : " n";
-  return { id: spec.id, cites: spec.cites, text, locator, joined, spec, provenance };
+  return { id: spec.id, cites: spec.cites, text, locator, label, joined, spec, provenance };
 }
 var quotedInNote = (text) => `\u201C${text}${/[.?!]$/.test(text) ? "" : "."}\u201D`;
 function noteCitations(note, groups) {
@@ -44480,12 +44726,13 @@ function noteCitations(note, groups) {
       const before = p.text === undefined ? "" : `${quotedInNote(p.text)} `;
       const last = citations.at(-1);
       const item = last?.cluster.items[0];
-      if (last && item && p.locator !== undefined && item.key === cites && item.locator === p.locator && last.cluster.items.length === 1) {
+      const label = p.label ?? "page";
+      if (last && item && p.locator !== undefined && item.key === cites && item.locator === p.locator && item.label === label && last.cluster.items.length === 1) {
         item.before = `${item.before}${before}`;
         last.quotations.push(p.id);
       } else {
         citations.push({
-          cluster: { note, items: [{ key: cites, ...p.locator === undefined ? {} : { label: "page", locator: p.locator }, before }] },
+          cluster: { note, items: [{ key: cites, ...p.locator === undefined ? {} : { label, locator: p.locator }, before }] },
           quotations: [p.id]
         });
       }
@@ -44559,7 +44806,12 @@ function assemble2(manuscript, resolve) {
         }
         if (groups.at(-1)?.cites !== found.cites)
           groups.push({ cites: found.cites, members: [] });
-        groups.at(-1).members.push({ id, ...found.locator === undefined ? {} : { locator: found.locator }, ...found.text === undefined ? {} : { text: found.text } });
+        groups.at(-1).members.push({
+          id,
+          ...found.locator === undefined ? {} : { locator: found.locator },
+          ...found.label === undefined ? {} : { label: found.label },
+          ...found.text === undefined ? {} : { text: found.text }
+        });
       }
       close();
       notes.push({
@@ -44726,13 +44978,14 @@ var changesOf = (p) => [
   ...p.provenance.flatMap((pr) => pr.labelBasis.map((b) => `locator: ${b}`))
 ];
 function verification2(corpus, spec, notes, passages, items) {
+  const allPages = [...passages.values()].every((p) => p.label === "page");
   const rows = [
     "# Verification of the report\u2019s notes",
     "",
     "This table is generated by `stemma build report` from the project's passage and source records and the report's quotation list (`report.json`). It is separate from the report and is not part of the publication.",
     "",
     ...(spec.verification?.preamble ?? []).flatMap((p) => [p, ""]),
-    "| Note | Passage | Source file, page index, characters | Printed page | How verified | Changes from the text layer |",
+    `| Note | Passage | Source file, page index, characters | ${allPages ? "Printed page" : "Place"} | How verified | Changes from the text layer |`,
     "|---|---|---|---|---|---|"
   ];
   for (const n of notes) {
@@ -44742,7 +44995,7 @@ function verification2(corpus, spec, notes, passages, items) {
       const p = passages.get(id);
       const address = p.provenance.map((pr) => `\`${pr.address}\` (record \`${pr.passage}\`)`).join("<br>");
       const changes = changesOf(p);
-      rows.push(`| ${n.number} | ${id}${n.inline.includes(id) ? " (quoted in the text)" : ""} | ${address} | ${p.locator} | ${p.spec.checked ?? "not recorded"} | ${changes.join("; ") || "none"} |`);
+      rows.push(`| ${n.number} | ${id}${n.inline.includes(id) ? " (quoted in the text)" : ""} | ${address} | ${p.label === "page" ? p.locator : `${p.label} ${p.locator}`} | ${p.spec.checked ?? "not recorded"} | ${changes.join("; ") || "none"} |`);
     }
   }
   rows.push("", "## Bibliographic details", "", "Where each detail of the cited works was read, as each source record's change log states it. Details recorded when a record was made are listed as recorded at intake.", "", "| Work | Recorded by | Where the details were read |", "|---|---|---|");
@@ -45018,7 +45271,7 @@ function read2(corpus, spec, template, include, exported) {
     const one = quotation(id);
     return {
       ...one.cites === undefined ? {} : { cites: one.cites },
-      ...one.built ? { locator: one.built.locator, text: one.built.text } : {}
+      ...one.built ? { locator: one.built.locator, label: one.built.label, text: one.built.text } : {}
     };
   });
   const clusters = clustersOf(assembly.notes);
@@ -45260,15 +45513,194 @@ Export again, then reload the page.`;
 }
 
 // packages/cli/src/ingest.ts
-import { dirname as dirname4, resolve as resolve8 } from "path";
+import { dirname as dirname4, resolve as resolve9 } from "path";
+import { createHash as createHash10 } from "crypto";
+
+// packages/cli/src/locate.ts
 import { createHash as createHash9 } from "crypto";
+import { statSync as statSync4 } from "fs";
+import { resolve as resolve8 } from "path";
+var digestOf2 = (bytes) => createHash9("sha256").update(bytes).digest("hex");
+async function ask(url) {
+  const response = await fetchBytes(url, USER_AGENT);
+  if (response.status !== 200)
+    throw new FetchRefused(`The address answered ${response.status}.`);
+  return { bytes: response.bytes, sha256: digestOf2(response.bytes) };
+}
+async function fetchOriginal(root, upstream, label, say, others) {
+  const wanted = String(upstream.sha256);
+  const addresses = addressesOf(upstream);
+  const listed = Array.isArray(upstream.locations) && upstream.locations.length > 0;
+  for (const [n, { url, kind }] of addresses.entries()) {
+    const where = listed ? `location ${n + 1} of ${addresses.length}, ${printable(url)}${kind ? ` (${kind})` : ""}: ` : "";
+    try {
+      const gave = await ask(url);
+      if (gave.sha256 !== wanted) {
+        others?.push({ url, ...gave });
+        say(listed ? `  ${label}: ${where}it gives different bytes from the recorded original (sha256 ${gave.sha256}). They were not used.` : `  ${label}: what the address gives now differs from the recorded original (sha256 ${gave.sha256}). It was not used.`);
+        continue;
+      }
+      if (listed)
+        say(`  ${label}: ${where}it gave the recorded original.`);
+      return cacheOriginal(root, gave.bytes, wanted);
+    } catch (error) {
+      if (!(error instanceof FetchRefused))
+        throw error;
+      say(`  ${label}: ${where}${error.message} Nothing was retried another way.`);
+    }
+  }
+  if (listed && addresses.length > 0)
+    say(`  ${label}: no listed address gave the recorded original.`);
+  return;
+}
+var privateLabels = (upstream) => (Array.isArray(upstream.locations) ? upstream.locations.filter(isObject) : []).flatMap((l) => l.kind === "private" ? [printable(String(l.label))] : []);
+async function sourceLocate(options, name) {
+  if (!name)
+    throw usageError("source locate needs an upstream ID, or the ID or citation key of a source with one upstream record.");
+  const actor = requireActor(options, "source locate records who added the location");
+  const { url, private: label } = options;
+  if (url === undefined === (label === undefined))
+    throw usageError("Give one location: --url <address> with --kind, or --private <label>.");
+  const kind = label !== undefined ? "private" : options.kind;
+  if (label !== undefined && options.kind !== undefined && options.kind !== "private")
+    throw usageError("--private names a private copy, so it takes no other --kind.");
+  if (!LOCATION_KINDS.includes(kind ?? "") || url !== undefined && kind === "private") {
+    throw usageError("--url needs --kind publisher, web_archive or archive. A private copy is recorded with --private <label> and no address.");
+  }
+  if (options.fetch && url === undefined)
+    throw usageError("--fetch asks an address. For a private copy, compare its file with --original <file>.");
+  if (options.original !== undefined && label === undefined)
+    throw usageError("--original compares the file of a private copy. For an address, use --fetch, which asks the address itself.");
+  const root = requireProject(options);
+  const request = {
+    upstream: name,
+    kind,
+    actor,
+    ...url !== undefined ? { url } : {},
+    ...label !== undefined ? { label } : {},
+    ...options.note ? { note: options.note } : {}
+  };
+  const first = planLocation(openCorpus(root), { ...request, now: new Date });
+  const lines = [];
+  let gave;
+  let failed = false;
+  if (options.original !== undefined) {
+    const path = resolve8(root, options.original);
+    try {
+      if (!statSync4(path).isFile())
+        throw new Error("not a file");
+      gave = hashFile(path).sha256;
+    } catch {
+      throw new InvalidInput("The file given with --original cannot be read.");
+    }
+  } else if (options.fetch) {
+    try {
+      const answer = await ask(url);
+      gave = answer.sha256;
+      const upstream = openCorpus(root).byId.get(first.upstream).data;
+      if (gave === upstream.sha256)
+        cacheOriginal(root, answer.bytes, gave);
+    } catch (error) {
+      if (!(error instanceof FetchRefused))
+        throw error;
+      failed = true;
+      lines.push(`  not compared: ${error.message} Nothing was retried another way.`);
+    }
+  }
+  const plan = planLocation(openCorpus(root), { ...request, now: new Date, ...gave !== undefined ? { gave } : {} });
+  const { record, ...result } = plan;
+  if (record)
+    writeProjectFile(root, record.path, record.text);
+  const differs = gave !== undefined && plan.bytes === "different";
+  const standing = plan.bytes === "same" ? "It was seen to give the recorded original." : plan.bytes === "different" ? `It was seen to give different bytes${gave ? ` (sha256 ${gave})` : ""}. It is not the original and is never used as it.` : "It was not compared, so it is a reference only.";
+  const head = [
+    `Upstream ${plan.upstream} of source ${plan.source}`,
+    `  ${plan.added ? "added" : "already listed"}: ${request.kind} ${printable(url ?? label)}`,
+    ...plan.notes.map((n) => `  note: ${n}`),
+    ...lines,
+    `  ${standing}`,
+    record ? "No source file was changed." : "Nothing new, so nothing was written."
+  ].join(`
+`);
+  const code = record ? reportRecords(options, written(root, [record.path]), `${head}
+`, result) : (emit(options, result, `${head}
+`), 0);
+  return failed || differs ? 1 : code;
+}
+
+// packages/cli/src/restore.ts
 var list6 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+function settings(media, entry, base) {
+  const convert = entry && isObject(entry.convert) ? entry.convert : {};
+  const named = (path) => typeof path === "string" ? namedFile(base, path, LIMITS.page_map_bytes) : undefined;
+  const numbers = list6(entry?.auxiliary).find((a) => a.role === "page_numbers")?.file;
+  const pdf = media === "application/pdf";
+  return [
+    ...typeof convert.page_map === "string" ? [{ how: "with the page map the plan names", options: () => ({ pageMap: parsePageMap(named(convert.page_map)) }) }] : [],
+    ...pdf ? [{ how: "with page labels proposed from the printed numbers", options: () => ({ autoPages: true, ...numbers ? { pageNumbers: named(numbers) } : {} }) }] : [],
+    { how: pdf ? "with no page labels" : "", options: () => ({}) }
+  ];
+}
+async function restoreText(root, text, original, entry, base, from) {
+  const data = text.manifest.data;
+  const where = `${text.directory}/`;
+  const not = (why) => ({ restored: false, said: `the text of ${where} was not restored${from ? ` from what ${printable(from)} gave` : ""}, and nothing was written. ${why}` });
+  const tie = isObject(data.original) ? data.original : {};
+  const files = list6(tie.files);
+  const conversion = data.conversion;
+  if (files.length !== 1 || !from && files[0].sha256 !== original.sha256 || !canConvertAgain(conversion, original.media_type)) {
+    return not("Its text was supplied by a tool or typed, so Stemma cannot make it from the original. Copy it from wherever you keep it.");
+  }
+  const wanted = list6(data.pages).map((p) => ({ index: Number(p.index), file: String(p.file), sha256: String(p.sha256) }));
+  let closest;
+  const failures = [];
+  for (const { how, options } of settings(original.media_type, entry, base)) {
+    let made;
+    try {
+      made = partTexts((await convertOriginal(original, { recognized: conversion.method === "ocr", ...options() })).converted);
+    } catch (error) {
+      if (!(error instanceof InvalidInput))
+        throw error;
+      failures.push(error.message);
+      continue;
+    }
+    const byFile = new Map(made.map((p) => [p.file, p]));
+    const differing = wanted.filter((p) => byFile.get(p.file)?.sha256 !== p.sha256).map((p) => p.index);
+    if (differing.length === 0 && made.length === wanted.length) {
+      for (const part of wanted)
+        writeProjectFile(root, `${text.directory}/${part.file}`, byFile.get(part.file).text);
+      const done = `restored ${wanted.length} ${data.paged === true ? "page" : "section"} file(s) of ${where}`;
+      const proven = `${how ? ` (converted ${how})` : ""}. Each has the digest the manifest records.`;
+      return {
+        restored: true,
+        said: from ? `${done} from what ${printable(from)} gave${proven} The text is restored, and the fetched copy is not the recorded original (its sha256 is ${original.sha256}): it was not kept, and nothing was compared with the original.` : `${done}${proven}`
+      };
+    }
+    if (!closest || differing.length < closest.differing.length)
+      closest = { differing, parts: made.length };
+  }
+  if (!closest)
+    return not(failures[0] ?? "The original could not be converted.");
+  const now = tools();
+  const changed = list6(conversion.tools).filter((t) => now[String(t.name)] !== undefined && now[String(t.name)] !== t.version).map((t) => `${String(t.name)} ${String(t.version)} then, ${now[String(t.name)]} now`);
+  const shown = closest.differing.slice(0, 20).join(", ");
+  return not([
+    from ? "Its bytes are not the recorded original, and converting them does not give the recorded text:" : "The original is the recorded one, but converting it again does not give the recorded text:",
+    closest.differing.length > 0 ? `${closest.differing.length} of ${wanted.length} listed parts differ (index ${shown}${closest.differing.length > 20 ? ", and more" : ""})` : "the listed parts agree",
+    closest.parts !== wanted.length ? `and it gives ${closest.parts} parts where the manifest lists ${wanted.length}` : "",
+    changed.length > 0 ? `. Converter versions differ: ${changed.join("; ")}` : "",
+    from ? ". Give the recorded original (--originals), or copy the text from wherever you keep it." : ". The text may have been corrected or relabelled by hand: copy it from wherever you keep it, or give the page map used, in an ingest plan (--plan)."
+  ].filter(Boolean).join(" ").replace(/ \./g, "."));
+}
+
+// packages/cli/src/ingest.ts
+var list7 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
 var text3 = (value) => typeof value === "string" ? value : undefined;
 var active3 = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
 function planEntries(options, root) {
   if (!options.plan)
     return { entries: [], base: root };
-  const path = resolve8(root, options.plan);
+  const path = resolve9(root, options.plan);
   const bytes = namedFile(root, options.plan, LIMITS.page_map_bytes);
   let value;
   try {
@@ -45278,13 +45710,13 @@ function planEntries(options, root) {
   }
   if (!isObject(value) || !Array.isArray(value.captures))
     throw new InvalidInput('A plan is an object with a "captures" list.');
-  return { entries: list6(value.captures), base: dirname4(path) };
+  return { entries: list7(value.captures), base: dirname4(path) };
 }
 var asOriginal = (bytes, name) => {
   const type = mediaType(bytes, name);
   if (!type)
     throw new InvalidInput(`What was fetched from ${name} is not a kind of file Stemma reads.`);
-  return { bytes, sha256: createHash9("sha256").update(bytes).digest("hex"), size: bytes.length, media_type: type };
+  return { bytes, sha256: createHash10("sha256").update(bytes).digest("hex"), size: bytes.length, media_type: type };
 };
 var during = (work) => work.catch((error) => {
   if (!(error instanceof InvalidInput))
@@ -45294,7 +45726,7 @@ var during = (work) => work.catch((error) => {
 async function ingest(options, check) {
   const actor = requireActor(options, "ingest records who ran it");
   const root = requireProject(options);
-  const places = (options.originals ?? []).map((p) => resolve8(root, p));
+  const places = (options.originals ?? []).map((p) => resolve9(root, p));
   const log = [];
   const say = (line) => {
     log.push(line);
@@ -45319,7 +45751,7 @@ async function ingest(options, check) {
     let retrieved = text3(entry.retrieved_at);
     const file = text3(entry.file);
     if (file) {
-      original = readOriginal(resolve8(base, file), LIMITS.input_bytes);
+      original = readOriginal(resolve9(base, file), LIMITS.input_bytes);
       if (!retrieved)
         throw usageError(`Plan entry ${label} gives a file, so it must say when it was retrieved (retrieved_at); that is never guessed.`);
     } else if (url && options.fetch) {
@@ -45343,14 +45775,14 @@ async function ingest(options, check) {
       continue;
     const auxiliary = [];
     let pageNumbers;
-    for (const aux of list6(entry.auxiliary)) {
+    for (const aux of list7(entry.auxiliary)) {
       const path = text3(aux.file);
       if (!path || !text3(aux.url))
         continue;
       const found = namedFile(base, path, LIMITS.page_map_bytes);
-      auxiliary.push({ role: String(aux.role), url: String(aux.url), sha256: createHash9("sha256").update(found).digest("hex"), size: found.length });
+      auxiliary.push({ role: String(aux.role), url: String(aux.url), sha256: createHash10("sha256").update(found).digest("hex"), size: found.length });
       if (aux.role === "page_numbers")
-        pageNumbers = resolve8(base, path);
+        pageNumbers = resolve9(base, path);
     }
     const id = `${KINDS.upstream.prefix}${randomToken()}`;
     const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
@@ -45374,7 +45806,7 @@ async function ingest(options, check) {
     };
     assertValid("Upstream", "upstream", canonical(upstream));
     cacheOriginal(root, original.bytes, original.sha256);
-    const held = [...corpus.texts.values()].some((t) => t.manifest.data.source === source && !isRetired(t.manifest.data) && list6(t.manifest.data.original.files).some((f) => f.sha256 === original.sha256));
+    const held = [...corpus.texts.values()].some((t) => t.manifest.data.source === source && !isRetired(t.manifest.data) && list7(t.manifest.data.original.files).some((f) => f.sha256 === original.sha256));
     if (!held) {
       const convert = isObject(entry.convert) ? entry.convert : {};
       const done = await during(convertAndWrite({
@@ -45394,7 +45826,7 @@ async function ingest(options, check) {
           ...text3(convert.recognition) ? { recognition: text3(convert.recognition) } : {},
           ...text3(convert.name) ? { name: text3(convert.name) } : {},
           ...text3(convert.coverage_note) ? { "coverage-note": text3(convert.coverage_note) } : {},
-          ...text3(convert.page_map) ? { "page-map": resolve8(base, text3(convert.page_map)) } : original.media_type === "application/pdf" ? { "auto-pages": true } : {},
+          ...text3(convert.page_map) ? { "page-map": resolve9(base, text3(convert.page_map)) } : original.media_type === "application/pdf" ? { "auto-pages": true } : {},
           ...pageNumbers ? { "page-numbers": pageNumbers } : {}
         }
       }));
@@ -45411,31 +45843,49 @@ async function ingest(options, check) {
     const data = upstream.data;
     const corpus = openCorpus(root);
     const label = String(corpus.byId.get(String(data.source))?.data?.citation_key ?? data.source);
-    const mine = [...corpus.texts].filter(([, t]) => t.manifest.data.source === data.source && !isRetired(t.manifest.data) && list6(t.manifest.data.original.files).some((f) => f.sha256 === data.sha256));
-    const todo = mine.map(([id, t]) => ({ id, loaded: t, standing: reconversions(corpus, id).find((r) => currentRun(r.data, t, tools()))?.data })).filter((m) => options.reconvert || !m.standing);
-    current += mine.length - todo.length;
+    const mine = [...corpus.texts].filter(([, t]) => t.manifest.data.source === data.source && !isRetired(t.manifest.data) && list7(t.manifest.data.original.files).some((f) => f.sha256 === data.sha256));
     const wanted = { sha256: String(data.sha256), size: Number(data.size) };
     let path = findOriginal(root, wanted, places);
-    if (!path && options.fetch && text3(data.url)) {
-      try {
-        const response = await fetchBytes(String(data.url), USER_AGENT);
-        const original = asOriginal(response.bytes, new URL(String(data.url)).pathname);
-        if (original.sha256 !== wanted.sha256)
-          say(`  ${label}: what the address gives now differs from the recorded original (sha256 ${original.sha256}). It was not used.`);
-        else
-          path = cacheOriginal(root, original.bytes, original.sha256);
-      } catch (error) {
-        if (!(error instanceof FetchRefused))
-          throw error;
-        say(`  ${label}: ${error.message} Nothing was retried another way.`);
+    const others = [];
+    const absent = mine.filter(([, t]) => t.notHeld);
+    if (!path && options.fetch)
+      path = await fetchOriginal(root, data, label, say, absent.length > 0 ? others : undefined);
+    else if (path && absent.length > 0 && Array.isArray(data.locations))
+      say(`  ${label}: the recorded original is in .stemma/originals/ or a place given with --originals, so no address was asked.`);
+    const original = path ? { ...readOriginal(path, LIMITS.input_bytes), media_type: String(data.media_type), name: path } : undefined;
+    for (const [, loaded] of absent) {
+      const entry = entries.find((e) => e.source === data.source && text3(e.url) === text3(data.url));
+      if (original) {
+        say(`  ${label}: ${(await restoreText(root, loaded, original, entry, base)).said}`);
+        continue;
       }
+      let restored = false;
+      for (const other of others) {
+        if (mediaType(other.bytes, new URL(other.url).pathname) !== data.media_type)
+          continue;
+        const done = await restoreText(root, loaded, { ...other, size: other.bytes.length, media_type: String(data.media_type), name: other.url }, entry, base, other.url);
+        say(`  ${label}: ${done.said}`);
+        if (restored = done.restored)
+          break;
+      }
+      if (!restored)
+        say(`  ${label}: the text of ${loaded.directory}/ is not held here, and its original was not available, so it was not restored.`);
     }
-    if (!path) {
+    const now = openCorpus(root);
+    const todo = mine.map(([id]) => {
+      const loaded = now.texts.get(id);
+      return { id, loaded, standing: reconversions(now, id).find((r) => currentRun(r.data, loaded, tools()))?.data };
+    }).filter((m) => options.reconvert || !m.standing);
+    current += mine.length - todo.length;
+    if (!original) {
+      for (const privately of privateLabels(data))
+        say(`  ${label}: a private copy is recorded as "${privately}", and no file with the original's digest was found. Give the copy or its folder with --originals.`);
       unavailable.push(label);
       continue;
     }
-    const original = { ...readOriginal(path, LIMITS.input_bytes), media_type: String(data.media_type), name: path };
     for (const { id, loaded, standing } of todo) {
+      if (loaded.notHeld)
+        continue;
       if (!loaded.usable) {
         say(`  ${label}: ${loaded.directory} is damaged, so it was not compared.`);
         continue;
@@ -45458,7 +45908,7 @@ async function ingest(options, check) {
   let made = 0;
   let saved = 0;
   for (const upstream of upstreams) {
-    for (const lookup of list6(upstream.data.lookups)) {
+    for (const lookup of list7(upstream.data.lookups)) {
       const identifier = isObject(lookup.identifier) ? lookup.identifier : {};
       const [resolver, scheme, value] = [String(lookup.resolver), String(identifier.scheme), String(identifier.value)];
       const source = String(upstream.data.source);
@@ -45492,7 +45942,7 @@ async function ingest(options, check) {
 
 // packages/cli/src/publish.ts
 import { existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync11, writeFileSync as writeFileSync8 } from "fs";
-import { join as join13, resolve as resolve9 } from "path";
+import { join as join13, resolve as resolve10 } from "path";
 var readJson2 = (path, what) => {
   try {
     return JSON.parse(readFileSync11(path, "utf8"));
@@ -45504,7 +45954,7 @@ function citeFormat(options) {
   if (!options.input)
     throw usageError('cite format needs --input <file> (or - for standard input): {"notes": [[{"key": "\u2026", "locator": "\u2026"}], \u2026]}.');
   const root = requireProject(options);
-  const input = readJson2(options.input === "-" ? "/dev/stdin" : resolve9(root, options.input), "The input");
+  const input = readJson2(options.input === "-" ? "/dev/stdin" : resolve10(root, options.input), "The input");
   const notes = isObject(input) && Array.isArray(input.notes) ? input.notes : undefined;
   const clusters = notes?.map((n) => Array.isArray(n) ? n.filter(isObject).map((i) => {
     if (typeof i.key !== "string")
@@ -45547,8 +45997,10 @@ async function buildReportCommand(options, dir) {
   try {
     built = buildReport(corpus, spec, template, include);
   } catch (error) {
-    if (error instanceof ReportError)
-      throw new CommandError(5, "report_input", `The report was not built: ${error.message}. Nothing was written.`, [rel]);
+    if (error instanceof ReportError) {
+      const told = options.check ? " Whether the report's files are current cannot be told." : "";
+      throw new CommandError(5, "report_input", `The report was not built: ${error.message}. Nothing was written.${told}`, [rel]);
+    }
     throw error;
   }
   const problems = built.problems.map((p) => `cite.format: ${p}`);
@@ -45674,7 +46126,7 @@ function reviewed(options, targets) {
 // packages/cli/src/mcp.ts
 import { randomBytes as randomBytes5 } from "crypto";
 import { existsSync as existsSync7 } from "fs";
-import { isAbsolute as isAbsolute3, join as join14, resolve as resolve10 } from "path";
+import { isAbsolute as isAbsolute3, join as join14, resolve as resolve11 } from "path";
 var MCP_BOUNDS = {
   result: 32000,
   readMs: 1e5,
@@ -45727,7 +46179,7 @@ function mcpTools(options) {
   function root() {
     if (!given || given.includes("${") || options.project === undefined && !isAbsolute3(given))
       throw new Refused("no_project", NO_PROJECT_NAMED);
-    const found = findProject(resolve10(given));
+    const found = findProject(resolve11(given));
     if (!found || !existsSync7(join14(found, "stemma.json")))
       throw new Refused("no_project", NO_PROJECT);
     return found;
@@ -46062,6 +46514,9 @@ The plugin runs this through its launcher: sh scripts/stemma.sh <data directory>
   source tag <id|key>... --actor <kind>:<name> [--add <tag>]... [--remove <tag>]... [--from <text>]
   source list [--tag <tag|namespace:>]... [--stage record|captured|text] [--has identifiers|lookup|tags]...
   source history <id|key>
+  source locate <upstream id|source id|key> --actor <kind>:<name> [--note <text>]
+             (--url <address> --kind publisher|web_archive|archive [--fetch] | --private <label> [--original <file>])
+             adds another place an original can be had from, or compares one; only the upstream record changes
   source pages <original> [--text-layer <file>] [--page-numbers <file>] [--out <file>]
   source convert [<original>] --source <id> --acquired-at <time> --actor <kind>:<name> [--origin <text>]
              [--source-version <text>] [--held-at <text>] [--description <text>] [--image <file>]...
@@ -46106,7 +46561,7 @@ The plugin runs this through its launcher: sh scripts/stemma.sh <data directory>
              the plugin declares it, and the host starts it
 
 Options: --project <dir> (default: nearest ancestor holding stemma.json), --format text|json
-Only ingest --fetch, ingest --refresh-lookups and resolve use the network, and build report --pdf once, to fetch the pinned Typst.
+Only ingest --fetch, ingest --refresh-lookups, source locate --fetch and resolve use the network, and build report --pdf once, to fetch the pinned Typst.
 Exit codes: 0 done, nothing open; 1 done, findings open; 2 usage or not implemented;
 3 project unreadable; 4 wrong runtime; 5 request not valid; 70 internal error.
 `;
@@ -46197,6 +46652,9 @@ var OPTIONS = {
   lookup: STRING,
   replace: FLAG,
   from: STRING,
+  url: STRING,
+  kind: STRING,
+  private: STRING,
   add: LIST2,
   remove: LIST2,
   tag: LIST2,
@@ -46216,6 +46674,7 @@ var COMMAND_OPTIONS = {
   "source tag": ["actor", "from", "add", "remove"],
   "source list": ["tag", "stage", "has"],
   "source history": [],
+  "source locate": ["actor", "url", "kind", "private", "note", "fetch", "original"],
   "source pages": ["text-layer", "page-numbers", "out"],
   "source label": ["actor", "page-map"],
   "source seal": ["actor", "note"],
@@ -46256,7 +46715,7 @@ function version(options) {
 }
 function doctor(options) {
   const flags = Object.fromEntries(ISOLATION_FLAGS.map((f) => [f, process.execArgv.includes(f)]));
-  const root = options.project ? resolve11(options.project) : undefined;
+  const root = options.project ? resolve12(options.project) : undefined;
   const project = root ?? "";
   const versions = tools();
   const info = {
@@ -46293,7 +46752,7 @@ function doctor(options) {
 function init(options) {
   if (!options.project)
     throw usageError("init needs --project <dir>.");
-  const root = resolve11(options.project);
+  const root = resolve12(options.project);
   const made = initProject(root);
   emit(options, { project: root, ...made }, `Created a Stemma project in ${root}
 ${made.written.map((f) => `  wrote ${f}`).join(`
@@ -46353,7 +46812,7 @@ function recordAdd(options, kind) {
   const corpus = openCorpus(root);
   let input;
   try {
-    input = readFileSync12(options.input === "-" ? 0 : resolve11(root, options.input), "utf8");
+    input = readFileSync12(options.input === "-" ? 0 : resolve12(root, options.input), "utf8");
   } catch {
     throw new InvalidInput("The input file cannot be read.");
   }
@@ -46507,6 +46966,9 @@ function dispatch(command, rest, options) {
     case "source history":
       only(1);
       return sourceHistoryCommand(options, rest[0]);
+    case "source locate":
+      only(1);
+      return sourceLocate(options, rest[0]);
     case "source pages":
       only(1);
       return sourcePages(options, rest[0]);

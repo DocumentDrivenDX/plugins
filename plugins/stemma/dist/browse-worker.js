@@ -19350,6 +19350,45 @@ function noteMarks(blocks) {
 var partFile = (paged, index) => `${paged ? "pages/p" : "sections/s"}${String(index).padStart(4, "0")}.md`;
 var SOURCE_DIRECTORY_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
 
+// packages/records/src/locations.ts
+var LABEL = /^[\p{L}\p{N}][\p{L}\p{M}\p{N} ._'()-]{0,79}$/u;
+function isLocationLabel(value) {
+  return LABEL.test(value);
+}
+function isLocationAddress(value) {
+  if (!/^https?:\/\//i.test(value))
+    return false;
+  try {
+    const url = new URL(value);
+    return url.username === "" && url.password === "";
+  } catch {
+    return false;
+  }
+}
+function hasCredentials(value) {
+  try {
+    const url = new URL(value);
+    return url.username !== "" || url.password !== "";
+  } catch {
+    return false;
+  }
+}
+function badLocations(locations) {
+  const seen = new Set;
+  return locations.flatMap((entry, i) => {
+    if (typeof entry !== "object" || entry === null || Array.isArray(entry))
+      return [];
+    const { kind, url, label } = entry;
+    const kept = kind === "private";
+    const name = kept ? label : url;
+    const shaped = kept ? url === undefined && typeof label === "string" && isLocationLabel(label) : label === undefined && typeof url === "string" && isLocationAddress(url);
+    const key = `${kept ? "label" : "url"} ${String(name)}`;
+    const repeated = seen.has(key);
+    seen.add(key);
+    return shaped && !repeated ? [] : [i];
+  });
+}
+
 // packages/records/src/schema.generated.ts
 var TYPES = {
   Actor: {
@@ -23437,6 +23476,48 @@ var TYPES = {
       required: true
     }
   },
+  LocationComparison: {
+    at: {
+      type: "date-time",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    }
+  },
+  UpstreamLocation: {
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "publisher",
+        "web_archive",
+        "archive",
+        "private"
+      ]
+    },
+    url: {
+      type: "string"
+    },
+    label: {
+      type: "string"
+    },
+    added: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    compared: {
+      type: {
+        value: "LocationComparison"
+      }
+    },
+    note: {
+      type: "string"
+    }
+  },
   Upstream: {
     schema: {
       type: "string",
@@ -23513,6 +23594,12 @@ var TYPES = {
     identifiers: {
       type: {
         value: "Identifier"
+      },
+      many: true
+    },
+    locations: {
+      type: {
+        value: "UpstreamLocation"
       },
       many: true
     },
@@ -24821,6 +24908,9 @@ var REFERENCES = {
   "upstream.retired.stamp.import": [
     "import_batch"
   ],
+  "upstream.locations.added.import": [
+    "import_batch"
+  ],
   "upstream.legacy.import": [
     "import_batch"
   ],
@@ -24980,8 +25070,20 @@ function checkRules(record, problems) {
     if (typeof value === "number" && value < 0)
       problems.push(invalid("bad_size", field));
   };
-  if (record.kind === "upstream")
+  if (record.kind === "upstream") {
     size(record.size, "/size");
+    if (Array.isArray(record.locations))
+      for (const i of badLocations(record.locations))
+        problems.push(invalid("bad_location", `/locations/${i}`));
+    if (typeof record.url === "string" && hasCredentials(record.url))
+      problems.push(invalid("bad_location", "/url"));
+    if (Array.isArray(record.auxiliary)) {
+      record.auxiliary.forEach((aux, i) => {
+        if (isObject(aux) && typeof aux.url === "string" && hasCredentials(aux.url))
+          problems.push(invalid("bad_location", `/auxiliary/${i}/url`));
+      });
+    }
+  }
   if (record.kind === "source_text" && isObject(record.original)) {
     const { form, files, description, held_at: held } = record.original;
     const list = Array.isArray(files) ? files : [];
@@ -25299,8 +25401,10 @@ function loadText(directory, files, manifest) {
     } else
       strays.push(file);
   }
-  const usable = manifest.state === "ok" && !blocking(manifest.problems) && damage.length === 0 && partFiles.every((f) => f.state === "ok" && !blocking(f.problems));
-  return { text: { manifest, directory, parts, damage, usable }, partFiles, strays };
+  const sound = manifest.state === "ok" && !blocking(manifest.problems);
+  const usable = sound && damage.length === 0 && partFiles.every((f) => f.state === "ok" && !blocking(f.problems));
+  const notHeld = sound && entries.length > 0 && partFiles.length === 0 && damage.length === entries.length && damage.every((d) => d.code === "part_missing");
+  return { text: { manifest, directory, parts, damage, usable, notHeld }, partFiles, strays };
 }
 function loadSources(sources) {
   const directories = new Map;
@@ -25479,6 +25583,8 @@ var LOCATION_FIELDS = new Set([
   "Original.obtained_from",
   "Upstream.url",
   "Upstream.note",
+  "UpstreamLocation.url",
+  "UpstreamLocation.label",
   "AuxiliaryFile.url",
   "Resolution.url",
   "CandidateOrigin.location",
@@ -26176,7 +26282,9 @@ var TEMPLATES = {
   "source.held:no_text": explain("A cited source's files hold no text, so this citation is unchecked.", HELD_WHY, ["Capture a copy of the source whose text can be read, or supply a transcription."], ["capture_source"]),
   "source.held:record_unreadable": explain("Whether this cited source's text is here could not be checked: a source file's manifest cannot be read.", HELD_WHY, ["Repair the unreadable file first (see the record.valid finding), then run `check` again."]),
   "source.held:source_damaged": explain("A cited source has a source file that is damaged, so it is not used and this citation is unchecked.", HELD_WHY, ["See the source.pages and record.valid findings on that source file. Restore it from git, or record your own edit with `source seal`."], ["restore_source"]),
+  "source.held:text_not_held": explain("The text of this cited source is not in this copy of the project, so this citation could not be checked.", HELD_WHY, ["See the source.pages finding for that source file. `ingest --fetch` fetches the original again and writes the text if it converts to exactly what the manifest records; `ingest --originals <dir>` does the same from a copy you have."], ["capture_source"]),
   "source.held:check_error": CHECK_FAILED,
+  "source.pages:not_held": explain("The source's text is not held here: its manifest is present and none of its page or section files is. Nothing shows that anything is damaged.", "Quotations, pages and anything else that rests on this text cannot be checked in this copy of the project.", ["Fetch it again with `ingest --fetch --actor <kind>:<name>`, which asks the recorded addresses, or give a copy of the original with `ingest --originals <dir>`. The text is written only if it is exactly what the manifest records. If you keep the text elsewhere, or it was typed or recognized by another tool, copy it back."], ["capture_source"]),
   "source.pages:part_missing": explain("A page or section file that the manifest lists is missing.", STRUCTURE_WHY, ["Restore the file from git."], ["restore_source"]),
   "source.pages:part_edited": explain("A page or section file differs from the digest its manifest records.", STRUCTURE_WHY, ["If you meant to edit it, record the edit with `source seal <text id> --actor person:<name>`. Otherwise restore it from git."], ["restore_source"]),
   "source.pages:part_unlisted": explain("A page or section file is in the source directory but not in its manifest.", STRUCTURE_WHY, ["Remove the file, or convert the source again."], ["restore_source"]),
@@ -26197,6 +26305,7 @@ var TEMPLATES = {
   "source.original:original_not_upstream": explain("A source file was converted from an original that none of the source's upstream records names.", ORIGINAL_WHY, ["Check which original is right. Record its upstream (`ingest --plan`), or retire this source file."]),
   "source.original:conversion_differs": explain("A fresh conversion of the original does not give the committed text, after a person's corrections are undone.", ORIGINAL_WHY, ["Look at the differing readings. If a person edited the words, mark the change as a correction; otherwise restore the file, or convert the original again and retire this one."]),
   "source.original:comparison_stale": explain("The text or the tools changed after the last fresh conversion was compared, so it no longer says anything.", ORIGINAL_WHY, ["Run `source verify <text id> --original <file>`, or `ingest` with the originals."], ["verify_original"]),
+  "source.original:text_not_held": explain("A source file's text is not here, so it was not compared with its original.", ORIGINAL_WHY, ["See the source.pages finding for this source file."]),
   "source.original:check_error": CHECK_FAILED,
   "claim.complete:claim_incomplete": explain("A claim in the ledger is incomplete: the evidence names what is missing of a note behind it, a confidence level and a reason.", CLAIM_WHY, ["For a missing note, record a note on the source passage and link it to the claim with an attestation; a passage linked directly is not a note, and a retired note or attestation no longer counts, nor does one that breaks a rule (see the record.valid findings). For a missing confidence level (low, medium or high) or reason, add them to the claim. Stemma has no command that edits a record: change the claim's file and run `fmt` on it. If you no longer hold the claim, retire it. Writing can carry on meanwhile, and a claim that is rightly left as it is, such as your own thesis, can be explained or dismissed."]),
   "claim.complete:record_unreadable": explain("Whether a note lies behind this claim could not be checked: a record that could link it to one cannot be read. Any other missing part is named in the evidence.", CLAIM_WHY, ["Repair the files named in the evidence (see the record.valid findings), then run `check` again. Add whatever else the evidence names as missing."]),
@@ -26204,7 +26313,7 @@ var TEMPLATES = {
   "source.changed:depends_on_retired": explain("This rests on a source file or source that has since been replaced or retired.", CHANGED_WHY, ["Compare what you took from it with what replaced it, then correct or retire this item if it no longer holds. Stemma cannot yet record that you have looked, so the finding stays listed."]),
   "source.changed:text_changed": explain("The text of a page or section changed after a passage this rests on was captured from it.", CHANGED_WHY, ["Look at the page, capture the passage again, and retire the old passage and anything copied from it that no longer holds."]),
   "source.changed:source_details_changed": explain("The source's details changed after a passage this rests on was captured.", CHANGED_WHY, ["Check that the passage still belongs to the source as it is now recorded, and capture it again if it does."]),
-  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: something it depends on cannot be read.", CHANGED_WHY, ["Repair the unreadable file first (see the record.valid and source.pages findings), then run `check` again."]),
+  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: something it depends on cannot be read.", CHANGED_WHY, ["See the record.valid and source.pages findings: repair the file, or fetch text that is not held here, then run `check` again."]),
   "source.changed:retired_text_not_followed": explain("A source file of this source was retired, and a citation with no record does not say whether it was written before or after.", CHANGED_WHY, ["Nothing needs doing: this is a limit of what was covered. Quotations, pages and locators are compared with the current text. What the sentence says in your own words is not."]),
   "source.changed:check_error": CHECK_FAILED,
   "quote.present:near_match": explain("A quotation is not in the source's text as written. A passage close to it is; both are shown.", QUOTE_WHY, ["Compare the two texts, and look at the page itself, since converted or recognized text can be wrong. If your quotation is wrong, capture the passage by its address so the words are copied. An omission, an added word, a change of capitals or punctuation, an ellipsis or a bracketed edit all count as differences."], ["capture_passage"]),
@@ -26227,9 +26336,11 @@ var TEMPLATES = {
   "locator.extent:no_extent": explain("A locator could not be checked: no extent is recorded for it, and no source file has its numbering.", UNLOCATED_WHY, ["For pages, label your source file's pages; a source with no pages cannot check a page number. For another kind of locator, record the work's extent on the source, taken from the work itself."], ["relabel"]),
   "locator.extent:unparsable_locator": explain("A locator is not written in a form that can be compared with the work's pages or extent.", UNLOCATED_WHY, ["Write it as the printed label, or as a range with both ends in full, such as 41-43. Otherwise check it by hand."]),
   "locator.extent:record_unreadable": explain("A locator could not be checked: a source file of this source cannot be read or is damaged.", UNLOCATED_WHY, ["See the record.valid and source.pages findings, repair the source file, then run `check` again."]),
+  "locator.extent:text_not_held": explain("A locator could not be checked: the text of this source is not in this copy of the project.", UNLOCATED_WHY, ["See the source.pages finding for that source file, and fetch its text again."]),
   "locator.extent:check_error": CHECK_FAILED,
   "meta.source:mismatch": explain("The source record disagrees with what the captured copy states about itself.", META_WHY, ["Compare both values with the title page of the work. Correct the record if it is wrong; if the copy is a different edition or a misdescribed file, capture the right one."], ["correct_record", "capture_source"]),
   "meta.source:source_damaged": explain("The source's details could not be compared with a copy: its source file is damaged.", META_WHY, ["See the source.pages finding and repair the source file."], ["restore_source"]),
+  "meta.source:text_not_held": explain("The source's details could not be compared with a copy: its text is not in this copy of the project.", META_WHY, ["See the source.pages finding for that source file, and fetch its text again."], ["capture_source"]),
   "meta.source:not_found_in_copy": explain("Some of the source's details are shown neither by the copy's title page text nor by a saved catalogue record, and nothing contradicts them.", META_WHY, ["Nothing needs doing: this is a limit of what was covered. A saved lookup or a copy with a clearer text would corroborate more. The author may also record what the title page shows (`review add --scope source_details`)."]),
   "meta.source:nothing_to_compare": explain("The source record has no title yet, so its details could not be compared with the copy.", META_WHY, ["Nothing needs doing. Once a title is recorded, it is compared."]),
   "meta.source:check_error": CHECK_FAILED,
@@ -26286,6 +26397,7 @@ var PROBLEMS = {
   bad_part: "the part is not in the source file format",
   model_verification: "a model's review can only flag; it is never a person's verification",
   response_digest_mismatch: "the saved response does not match its digest",
+  bad_location: "a location is an http or https address with no user name or password, or, for a private copy, a name that is no path or address; none is listed twice",
   bad_address: "a passage address needs, for each part, a start before its end",
   bad_binding: "an annotation binds a sentence and its source, or one record, never both",
   note_without_passage: "an extract or paraphrase note names no passage, so nothing shows where in its source it comes from; capture the passage (`passage capture`) and name it in `passages`, or make the note a comment if it is a remark of your own",
@@ -26892,6 +27004,9 @@ class SourceTexts {
     this.bySource ??= new Map([...grouped([...this.corpus.texts].filter(([, t]) => !isRetired(t.manifest.data)), ([, t]) => [t.manifest.data.source])].map(([of, list]) => [of, list.sort(([, a], [, b]) => a.directory < b.directory ? -1 : 1).map(([id]) => id)]));
     return [...this.bySource.get(source) ?? []];
   }
+  notHeld(ids) {
+    return ids.length > 0 && ids.every((id) => this.corpus.texts.get(id)?.notHeld === true);
+  }
   of(source) {
     const ids = this.idsOf(source);
     const views = ids.flatMap((id) => this.view(id) ?? []);
@@ -27034,10 +27149,13 @@ function coverageOf(corpus, text, tools = {}) {
     reviewed_by_person: whole.size,
     stale_reviews: stale,
     flags,
-    runs
+    runs,
+    ...text.notHeld ? { not_held: true } : {}
   };
 }
 function coverageWords(c) {
+  if (c.not_held)
+    return "its text is not held here";
   const compared = c.runs.filter((r) => r.current).map((r) => `${r.method === "reconversion" ? "fresh conversion" : "second text"}: ${r.parts - r.differing_parts} of ${r.parts} parts agree`);
   return [
     `${c.reviewed_by_person} of ${c.parts} parts reviewed whole by a person`,
@@ -28073,7 +28191,7 @@ function holding(texts, source) {
   }
   const damaged = ids.filter((id) => !texts.view(id));
   if (damaged.length > 0) {
-    return { outcome: "unverifiable", reason: "source_damaged", evidence: damaged.map((id) => at2("source_text", corpus.texts.get(id).manifest.path)) };
+    return { outcome: "unverifiable", reason: texts.notHeld(damaged) ? "text_not_held" : "source_damaged", evidence: damaged.map((id) => at2("source_text", corpus.texts.get(id).manifest.path)) };
   }
   const evidence = [];
   let held = false;
@@ -28249,8 +28367,11 @@ function judgeLocator(texts, source, locator) {
     return { ...overall(wheres, "outside_extent"), evidence: [shown] };
   }
   const ids = texts.idsOf(String(source.id));
-  if (manifestsUnread(texts.corpus) || ids.some((id) => !texts.view(id)))
+  const unused = ids.filter((id) => !texts.view(id));
+  if (manifestsUnread(texts.corpus))
     return unverifiable("record_unreadable");
+  if (unused.length > 0)
+    return unverifiable(texts.notHeld(unused) ? "text_not_held" : "record_unreadable");
   const mapped = TERMS.has(term) ? mappedPlaces(texts, String(source.id), term) : undefined;
   if (!mapped || mapped.labels.size === 0) {
     const unpaged = (term === "page" || term === "folio") && ids.length > 0 && ids.every((id) => !texts.view(id).paged);
@@ -28723,6 +28844,7 @@ var WITHHELD = new Set(["place", "place_name", "place_location", "place_assertio
 
 // packages/core/src/annotations.ts
 var NOT_DISMISSIBLE = new Set(["source.held", "record.valid", "build.uncommitted"]);
+var dismissible = (found) => !NOT_DISMISSIBLE.has(found.check) && !(found.check === "source.pages" && found.reason_code === "not_held");
 function bindingOf(corpus, found) {
   if (found.sentence) {
     const source = found.source === undefined ? undefined : corpus.byId.get(found.source)?.data;
@@ -28768,7 +28890,7 @@ function annotate(corpus, results) {
     });
     if (applying.length === 0)
       return found;
-    const dismissed = !NOT_DISMISSIBLE.has(found.check) && applying.some((n) => n.effect === "dismiss" && n.person);
+    const dismissed = dismissible(found) && applying.some((n) => n.effect === "dismiss" && n.person);
     return { ...found, annotations: applying.map(({ person: _p, ...n }) => n), open: found.open && !dismissed };
   });
 }
@@ -29187,7 +29309,7 @@ function sourceMetaResults(corpus, texts = new SourceTexts(corpus)) {
     const base = [location2("source_file", source.path), keyOf(source)];
     const { views } = texts.of(idOf(source));
     if (views.length === 0)
-      return result({ ...shared(check, source), outcome: "unverifiable", reason: "source_damaged", evidence: base });
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: texts.notHeld(texts.idsOf(idOf(source))) ? "text_not_held" : "source_damaged", evidence: base });
     const record = describe(source.data);
     const judged = views.map((v) => againstCopy(record, v)).sort((a, b) => score(a.statuses) - score(b.statuses))[0];
     const evidence = [...base, ...judged.evidence];
@@ -29400,6 +29522,22 @@ function pageResults(corpus) {
   const check = "source.pages";
   return activeTexts(corpus).flatMap(([id, text]) => {
     const parts = meta4("parts", `${text.parts.length} ${text.manifest.data.paged === true ? "page files" : "section files"} present`);
+    if (text.notHeld) {
+      const passages = new Set(activeWhere(corpus, "passage", "text", id).map(idOf));
+      const citations = active(corpus, "citation").filter((c) => passages.has(String(c.data.passage))).length;
+      return [result({
+        ...common(check, text),
+        outcome: "unverifiable",
+        reason: "not_held",
+        locus: id,
+        evidence: [
+          at3("source_text", text.manifest.path),
+          meta4("parts", `none of the ${text.damage.length} listed ${text.manifest.data.paged === true ? "page files" : "section files"} is here`),
+          meta4("rests_on_it", `${passages.size} passage(s) and ${citations} citation record(s) taken from this text cannot be checked`),
+          meta4("fetch_again", `ingest --fetch --actor <kind>:<name>, or ingest --originals <dir> when you have the original`)
+        ]
+      })];
+    }
     if (text.damage.length > 0) {
       return text.damage.map((d) => result({
         ...common(check, text),
@@ -29552,6 +29690,16 @@ function originalResults(corpus, tools) {
       return [result({ ...shared, outcome: "fail", reason: "original_not_upstream", locus: `${id}#upstream`, evidence: [...evidence, ...upstreams.map((u) => at4("upstream_file", u.path))] })];
     }
     const upstreamWords = upstreams.length > 0 ? [meta5("upstream", "the original's digest matches an upstream record")] : [];
+    if (text.notHeld) {
+      return [result({
+        ...shared,
+        outcome: "unverifiable",
+        reason: "text_not_held",
+        locus: id,
+        coverage: true,
+        evidence: [...evidence, ...upstreamWords, meta5("coverage", "not compared with its original: its text is not here")]
+      })];
+    }
     if (runs.length === 0) {
       return [result({ ...shared, outcome: "pass", locus: id, evidence: [...evidence, ...upstreamWords, meta5("fresh_conversion", "none recorded: this says nothing about the text against the original")] })];
     }
@@ -38095,6 +38243,7 @@ function render2(corpus, texts, spec) {
   const container = containerOf(corpus, cited);
   const pieces = [];
   const locators = [];
+  const labels = new Set;
   const provenance = [];
   spec.passages.forEach((segment, n) => {
     const passage = corpus.byId.get(segment.passage)?.data;
@@ -38106,6 +38255,10 @@ function render2(corpus, texts, spec) {
     const at = textAt(texts, passage);
     if (at.state === "changed")
       throw new ReportError(`${spec.id}: page ${at.index} of ${String(passage.text)} has changed since ${segment.passage} was captured`);
+    if (at.state === "unavailable") {
+      const why = texts.notHeld([String(passage.text)]) ? "it is not held here" : "a part of it is missing or damaged";
+      throw new ReportError(`${spec.id}: the text of ${String(passage.text)} cannot be read, so ${segment.passage} cannot be copied from it; ${why}, as \`check\` explains`);
+    }
     if (at.state !== "ok" || !isObject(passage.quote) || at.text !== passage.quote.exact) {
       throw new ReportError(`${spec.id}: the source file no longer gives the text ${segment.passage} captured`);
     }
@@ -38123,6 +38276,7 @@ function render2(corpus, texts, spec) {
       pieces.push(segment.join ?? " ");
     pieces.push(at.text);
     locators.push(String(passage.locator.value));
+    labels.add(String(passage.locator.label));
   });
   let text = pieces.join("");
   const keep = new Set(spec.keep_hyphens ?? []);
@@ -38149,10 +38303,15 @@ function render2(corpus, texts, spec) {
     text = text.replaceAll(word, `*${word}*`);
   }
   const seen = [...new Set(locators)];
+  const [label = "page", ...others] = [...labels];
+  if (others.length > 0)
+    throw new ReportError(`${spec.id}: its passages are located by ${[label, ...others].join(" and ")}, which one citation cannot give`);
+  if (spec.note && label !== "page")
+    throw new ReportError(`${spec.id}: "note" marks a note on a page, and this passage is located by ${label}`);
   let locator = seen.length === 1 ? seen[0] : pageRange(seen[0], seen.at(-1));
   if (spec.note)
     locator += /\d$/.test(locator) ? "n" : " n";
-  return { id: spec.id, cites: spec.cites, text, locator, joined, spec, provenance };
+  return { id: spec.id, cites: spec.cites, text, locator, label, joined, spec, provenance };
 }
 var quotedInNote = (text) => `\u201C${text}${/[.?!]$/.test(text) ? "" : "."}\u201D`;
 function noteCitations(note, groups) {
@@ -38162,12 +38321,13 @@ function noteCitations(note, groups) {
       const before = p.text === undefined ? "" : `${quotedInNote(p.text)} `;
       const last = citations.at(-1);
       const item = last?.cluster.items[0];
-      if (last && item && p.locator !== undefined && item.key === cites && item.locator === p.locator && last.cluster.items.length === 1) {
+      const label = p.label ?? "page";
+      if (last && item && p.locator !== undefined && item.key === cites && item.locator === p.locator && item.label === label && last.cluster.items.length === 1) {
         item.before = `${item.before}${before}`;
         last.quotations.push(p.id);
       } else {
         citations.push({
-          cluster: { note, items: [{ key: cites, ...p.locator === undefined ? {} : { label: "page", locator: p.locator }, before }] },
+          cluster: { note, items: [{ key: cites, ...p.locator === undefined ? {} : { label, locator: p.locator }, before }] },
           quotations: [p.id]
         });
       }
@@ -38241,7 +38401,12 @@ function assemble2(manuscript, resolve) {
         }
         if (groups.at(-1)?.cites !== found.cites)
           groups.push({ cites: found.cites, members: [] });
-        groups.at(-1).members.push({ id, ...found.locator === undefined ? {} : { locator: found.locator }, ...found.text === undefined ? {} : { text: found.text } });
+        groups.at(-1).members.push({
+          id,
+          ...found.locator === undefined ? {} : { locator: found.locator },
+          ...found.label === undefined ? {} : { label: found.label },
+          ...found.text === undefined ? {} : { text: found.text }
+        });
       }
       close();
       notes.push({
@@ -38444,7 +38609,7 @@ function read(corpus, spec, template, include, exported) {
     const one = quotation(id);
     return {
       ...one.cites === undefined ? {} : { cites: one.cites },
-      ...one.built ? { locator: one.built.locator, text: one.built.text } : {}
+      ...one.built ? { locator: one.built.locator, label: one.built.label, text: one.built.text } : {}
     };
   });
   const clusters = clustersOf(assembly.notes);
@@ -47317,7 +47482,7 @@ var IGNORED = [".stemma/", "build/", ...ORIGINAL_FORMATS.map((e) => `*.${anyCase
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.18",
+  version: "0.0.19",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
