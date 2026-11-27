@@ -34342,7 +34342,7 @@ function __wbg_get_imports() {
   };
 }
 function getStringFromWasm0(ptr, len) {
-  return decodeText(ptr >>> 0, len);
+  return decodeText2(ptr >>> 0, len);
 }
 function getUint8ArrayMemory0() {
   if (cachedUint8ArrayMemory0 === null || cachedUint8ArrayMemory0.byteLength === 0) {
@@ -34356,7 +34356,7 @@ function passArray8ToWasm0(arg, malloc) {
   WASM_VECTOR_LEN = arg.length;
   return ptr;
 }
-function decodeText(ptr, len) {
+function decodeText2(ptr, len) {
   numBytesDecoded += len;
   if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
     cachedTextDecoder = new TextDecoder("utf-8", {
@@ -101126,9 +101126,8 @@ var init_pdf_worker = __esm(() => {
 });
 
 // packages/cli/src/main.ts
-import { Database } from "bun:sqlite";
-import { existsSync as existsSync4, readFileSync as readFileSync3, statSync as statSync2, writeFileSync as writeFileSync2 } from "fs";
-import { join as join4, resolve as resolve3 } from "path";
+import { existsSync as existsSync3, readFileSync as readFileSync4 } from "fs";
+import { join as join4, resolve as resolve5 } from "path";
 import { parseArgs } from "util";
 
 // packages/records/src/json.ts
@@ -101301,8 +101300,10 @@ function normalizeSentence(text) {
 var KINDS = Object.fromEntries([
   ["source", "src-", "sources"],
   ["agent", "agt-", "agents"],
-  ["capture", "cap-", "captures"],
-  ["extraction", "ext-", "extractions"],
+  ["source_text", "txt-", ""],
+  ["upstream", "ups-", "upstreams"],
+  ["text_review", "rvw-", "text-reviews"],
+  ["comparison_run", "run-", "comparison-runs"],
   ["passage", "psg-", "passages"],
   ["note", "nte-", "notes"],
   ["claim", "clm-", "claims"],
@@ -101325,7 +101326,6 @@ var KINDS = Object.fromEntries([
   ["annotation", "ann-", "annotations"],
   ["resolution", "res-", "resolutions"],
   ["import_batch", "imp-", "imports"],
-  ["confirmation", "cnf-", "confirmations"],
   ["plan", "pln-", "plans"],
   ["checkpoint_input", "ckp-", "checkpoint-inputs"],
   ["authorship_mark", "aum-", "authorship-marks"],
@@ -101344,13 +101344,25 @@ var RECORD_SCHEMA = "stemma.record/0";
 var PROJECT_SCHEMA = "stemma.project/0";
 var PROJECT_FORMAT = 0;
 function recordPath(kind, id) {
+  if (kind === "source_text")
+    throw new Error("a source text is a manifest, not a file under records/");
   return `records/${KINDS[kind].directory}/${id}.json`;
 }
 function isRecordId(kind, id) {
   const prefix = KINDS[kind]?.prefix;
   return prefix !== undefined && id.startsWith(prefix) && /^[0-9a-z]{8,40}$/.test(id.slice(prefix.length));
 }
-var FULLY_CHECKED_KINDS = new Set(["source", "citation", "agent", "capture", "extraction"]);
+var FULLY_CHECKED_KINDS = new Set([
+  "source",
+  "citation",
+  "agent",
+  "source_text",
+  "upstream",
+  "text_review",
+  "comparison_run",
+  "passage",
+  "resolution"
+]);
 var SOURCE_BINDING_FIELDS = [
   "type",
   "subtype",
@@ -101365,118 +101377,159 @@ var SOURCE_BINDING_FIELDS = [
   "locator_label"
 ];
 
-// packages/records/src/pages.ts
-var ROMAN = [
-  [1000, "m"],
-  [900, "cm"],
-  [500, "d"],
-  [400, "cd"],
-  [100, "c"],
-  [90, "xc"],
-  [50, "l"],
-  [40, "xl"],
-  [10, "x"],
-  [9, "ix"],
-  [5, "v"],
-  [4, "iv"],
-  [1, "i"]
-];
-function toRoman(value) {
-  let left = value;
-  let out = "";
-  for (const [amount, letters] of ROMAN) {
-    while (left >= amount) {
-      out += letters;
-      left -= amount;
-    }
-  }
-  return out;
+// packages/records/src/sourcefile.ts
+var MAIN_ROLES = ["undetermined", "paragraph", "heading", "blockquote", "list-item", "table", "caption"];
+var NOTE_ROLES = ["footnote"];
+var FURNITURE_ROLES = ["running-head", "folio", "boilerplate"];
+var ASIDE_ROLES = ["figure", "note"];
+var BLOCK_ROLES = [...MAIN_ROLES, ...NOTE_ROLES, ...FURNITURE_ROLES, ...ASIDE_ROLES];
+var PARAGRAPH_ROLES = ["paragraph", "blockquote", "list-item", "table"];
+var BLOCK_ATTRIBUTES = ["role", "level", "label", "continued", "column", "by", "basis"];
+var INLINE_ATTRIBUTES = {
+  fnref: ["label"],
+  uncertain: ["by", "alt"],
+  corrected: ["was", "by", "basis"]
+};
+var encodeText = (text) => text.replace(/<|&(?=(?:lt|amp);)/g, (c) => c === "<" ? "&lt;" : "&amp;");
+var decodeText = (text) => text.replace(/&(lt|amp);/g, (_, name) => name === "lt" ? "<" : "&");
+var encodeValue = (value) => value.replace(/\s*[\r\n]+\s*/g, " ").replace(/[&"<>]/g, (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c]);
+var decodeValue = (value) => value.replace(/&(amp|quot|lt|gt);/g, (_, n) => ({ amp: "&", quot: '"', lt: "<", gt: ">" })[n]);
+var attributes = (names, values) => names.filter((n) => values[n] !== undefined).map((n) => ` ${n}="${encodeValue(values[n])}"`).join("");
+var blockLine = (block) => `<!-- stemma:block${attributes(BLOCK_ATTRIBUTES, block)} -->`;
+var inline = (kind, values, encoded) => `<!--stemma:${kind}${attributes(INLINE_ATTRIBUTES[kind], values)}-->${encoded}<!--/stemma:${kind}-->`;
+var INLINE = /<!--stemma:(fnref|uncertain|corrected)((?: [a-z]+="[^"<>\n]*")*)-->([^<]*)<!--\/stemma:\1-->/g;
+var BLOCK_LINE = /^<!-- stemma:block((?: [a-z]+="[^"<>\n]*")*) -->$/;
+function parseAttributes(text) {
+  const found = {};
+  for (const [, name, value] of text.matchAll(/ ([a-z]+)="([^"]*)"/g))
+    found[name] = decodeValue(value);
+  return found;
 }
-function fromRoman(text) {
-  let value = 0;
-  let at = 0;
-  for (const [amount, letters] of ROMAN) {
-    while (value < 5000 && text.startsWith(letters, at)) {
-      value += amount;
-      at += letters.length;
-    }
-  }
-  return value > 0 && at === text.length && toRoman(value) === text ? value : undefined;
-}
-function firstNumber(style, label) {
-  if (typeof label !== "string")
-    return;
-  if (style === "arabic")
-    return /^[1-9]\d{0,6}$/.test(label) ? Number(label) : undefined;
-  if (style === "roman_lower")
-    return fromRoman(label);
-  return label === label.toUpperCase() ? fromRoman(label.toLowerCase()) : undefined;
-}
-var isIndex = (value) => Number.isSafeInteger(value) && value >= 0;
-var asObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
-function checkPageSegments(pages) {
-  if (!Array.isArray(pages))
-    return [];
+var trimLines = (text) => text.replace(/^(?:[ \t]*\n)+/, "").replace(/(?:\n[ \t]*)+$/, "");
+function parseBlocks(body, from = 1) {
   const problems = [];
-  const taken = [];
-  pages.forEach((entry, index) => {
-    const { first_index: first, last_index: last, style, first_label, labels, evidence } = asObject(entry);
-    const add = (code) => problems.push({ code, index });
-    if (!isIndex(first) || !isIndex(last) || last < first || taken.some(([a, b]) => first <= b && last >= a)) {
-      add("bad_page_range");
+  const blocks = [];
+  let open;
+  const close = () => {
+    if (!open)
       return;
+    open.block.content = trimLines(open.lines.join(`
+`));
+    let rest = open.block.content;
+    for (const match of rest.matchAll(INLINE)) {
+      const values = parseAttributes(match[2]);
+      if (Object.keys(values).some((n) => !INLINE_ATTRIBUTES[match[1]].includes(n))) {
+        problems.push({ code: "unknown_annotation", line: open.line });
+      }
+      if (match[1] === "corrected" && !/^person:\S/.test(values.by ?? "")) {
+        problems.push({ code: "correction_not_by_person", line: open.line });
+      }
     }
-    taken.push([first, last]);
-    if (style === "unnumbered") {
-      if (first_label !== undefined || labels !== undefined)
-        add("bad_page_labels");
-      return;
+    rest = rest.replace(INLINE, "");
+    if (rest.includes("<")) {
+      problems.push({ code: /<!--\/?stemma/.test(rest) ? "unknown_annotation" : "raw_angle", line: open.line });
     }
-    if (style === "explicit") {
-      if (!Array.isArray(labels) || labels.length !== last - first + 1 || first_label !== undefined)
-        add("bad_page_labels");
-    } else if (typeof style === "string" && (labels !== undefined || firstNumber(style, first_label) === undefined)) {
-      add("bad_page_labels");
-    }
-    if (evidence === undefined)
-      add("label_evidence_missing");
+    blocks.push(open.block);
+    open = undefined;
+  };
+  body.split(`
+`).forEach((line, i) => {
+    const header = BLOCK_LINE.exec(line);
+    if (header) {
+      close();
+      const values = parseAttributes(header[1]);
+      if (Object.keys(values).some((n) => !BLOCK_ATTRIBUTES.includes(n))) {
+        problems.push({ code: "unknown_annotation", line: from + i });
+      }
+      if (!BLOCK_ROLES.includes(values.role ?? ""))
+        problems.push({ code: "unknown_role", line: from + i });
+      open = { block: { ...values, role: values.role ?? "", content: "" }, lines: [], line: from + i };
+    } else if (open)
+      open.lines.push(line);
+    else if (line.trim() !== "")
+      problems.push({ code: "text_outside_block", line: from + i });
   });
-  return problems;
+  close();
+  return { blocks, problems };
 }
-function checkPageSpans(spans, length) {
-  if (!Array.isArray(spans))
-    return [];
-  const bad = [];
-  let page = -1;
-  let end = 0;
-  spans.forEach((entry, index) => {
-    const span = asObject(entry);
-    const ok = isIndex(span.page_index) && isIndex(span.start) && isIndex(span.end) && span.page_index > page && span.start >= end && span.end >= span.start && (length === undefined || span.end <= length);
-    if (!ok)
-      bad.push(index);
-    else {
-      page = span.page_index;
-      end = span.end;
-    }
-  });
-  return bad;
-}
-function pageLabels(segments) {
-  const labels = new Map;
-  for (const segment of segments) {
-    if (segment.style === "unnumbered")
-      continue;
-    const start = segment.style === "explicit" ? 0 : firstNumber(segment.style, segment.first_label);
-    if (start === undefined)
-      continue;
-    for (let i = segment.first_index;i <= segment.last_index; i++) {
-      const offset = i - segment.first_index;
-      const label = segment.style === "explicit" ? segment.labels?.[offset] : segment.style === "arabic" ? String(start + offset) : segment.style === "roman_lower" ? toRoman(start + offset) : toRoman(start + offset).toUpperCase();
-      if (label !== undefined)
-        labels.set(i, label);
-    }
+function splitFrontMatter(text) {
+  const normal = text.replace(/\r\n/g, `
+`);
+  if (!normal.startsWith(`---
+`))
+    return { problem: "front_matter_missing" };
+  const end = normal.indexOf(`
+---
+`, 3);
+  if (end < 0)
+    return { problem: "front_matter_missing" };
+  const json = normal.slice(4, end + 1);
+  try {
+    const { value } = parseJson(json);
+    if (typeof value !== "object" || value === null || Array.isArray(value))
+      return { problem: "front_matter_unreadable" };
+    const body = normal.slice(end + 5);
+    return { front: value, body, bodyLine: normal.slice(0, end + 5).split(`
+`).length };
+  } catch (error) {
+    if (!(error instanceof JsonUnreadable))
+      throw error;
+    return { problem: "front_matter_unreadable", detail: error.problem };
   }
-  return labels;
+}
+var frontMatter = (front) => `---
+${canonical(front)}---
+`;
+function serializePart(front, blocks) {
+  const body = blocks.map((b) => `${blockLine(b)}
+${b.content === "" ? "" : `${trimLines(b.content)}
+`}`).join(`
+`);
+  return `${frontMatter(front)}${body === "" ? "" : `
+${body}`}`;
+}
+function serializeManifest(front, body = "") {
+  const rest = trimLines(body);
+  return `${frontMatter(front)}${rest === "" ? "" : `
+${rest}
+`}`;
+}
+function tableText(content) {
+  return content.split(`
+`).filter((line) => !(line.includes("-") && /^[\s|:-]+$/.test(line))).map((line) => line.trim().replace(/^\|/, "").replace(/(?<!\\)\|$/, "").split(/(?<!\\)\|/).map((c) => c.trim().replace(/\\\|/g, "|")).join(" ")).join(`
+`);
+}
+function blockText(block, asConverted = false) {
+  const plain = block.content.replace(INLINE, (_, kind, attrs, inner) => {
+    if (kind === "fnref")
+      return "";
+    if (kind === "corrected" && asConverted)
+      return encodeText(parseAttributes(attrs).was ?? "");
+    return inner;
+  });
+  return decodeText(block.role === "table" ? tableText(plain) : plain);
+}
+function streamsOf(blocks, asConverted = false) {
+  const of = (roles) => blocks.filter((b) => roles.includes(b.role)).map((b) => blockText(b, asConverted)).filter((t) => t !== "").join(`
+`);
+  return { main: of(MAIN_ROLES), notes: of(NOTE_ROLES), furniture: of(FURNITURE_ROLES) };
+}
+var textDigest = (blocks) => {
+  const { main, notes, furniture } = streamsOf(blocks);
+  return digest({ furniture, main, notes });
+};
+var fileDigest = (text) => sha256(text.replace(/\r\n/g, `
+`));
+function noteMarks(blocks) {
+  const markers = blocks.flatMap((b) => [...b.content.matchAll(INLINE)].filter((m) => m[1] === "fnref").map((m) => parseAttributes(m[2]).label ?? ""));
+  const notes = blocks.filter((b) => b.role === "footnote").map((b) => ({ label: b.label ?? "", continued: b.continued === "yes" }));
+  return { markers, notes };
+}
+var partFile = (paged, index) => `${paged ? "pages/p" : "sections/s"}${String(index).padStart(4, "0")}.md`;
+var SOURCE_DIRECTORY_NAME = /^[a-z0-9][a-z0-9-]{0,79}$/;
+function slugOf(key) {
+  const slug = key.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 80);
+  return SOURCE_DIRECTORY_NAME.test(slug) && !/^(con|prn|aux|nul|com\d|lpt\d)$/.test(slug) ? slug : undefined;
 }
 
 // packages/records/src/schema.generated.ts
@@ -101578,9 +101631,8 @@ var TYPES = {
       type: "string",
       required: true
     },
-    extraction: {
-      type: "string",
-      required: true
+    text: {
+      type: "string"
     }
   },
   RecheckResult: {
@@ -101830,16 +101882,6 @@ var TYPES = {
       type: "string"
     }
   },
-  PositionSelector: {
-    start: {
-      type: "integer",
-      required: true
-    },
-    end: {
-      type: "integer",
-      required: true
-    }
-  },
   Region: {
     page_index: {
       type: "integer",
@@ -101892,6 +101934,8 @@ var TYPES = {
     evidence: {
       type: "string",
       values: [
+        "page_image",
+        "source_marker",
         "printed_sequence",
         "embedded_label",
         "author_statement"
@@ -101906,35 +101950,6 @@ var TYPES = {
     version: {
       type: "string",
       required: true
-    }
-  },
-  ExtractionQuality: {
-    method: {
-      type: "string",
-      required: true,
-      values: [
-        "text_layer",
-        "ocr",
-        "manual",
-        "born_text"
-      ]
-    },
-    level: {
-      type: "string",
-      required: true,
-      values: [
-        "good",
-        "partial",
-        "poor",
-        "unassessed"
-      ]
-    },
-    scripts: {
-      type: "string",
-      many: true
-    },
-    note: {
-      type: "string"
     }
   },
   SentenceBinding: {
@@ -101956,7 +101971,7 @@ var TYPES = {
       type: "string",
       required: true
     },
-    capture_sha256: {
+    text_sha256: {
       type: "string",
       many: true
     }
@@ -101987,9 +102002,6 @@ var TYPES = {
     },
     mapped_sha256: {
       type: "string"
-    },
-    value_blob_sha256: {
-      type: "string"
     }
   },
   LegacyEntry: {
@@ -102015,9 +102027,6 @@ var TYPES = {
         value: "LegacyField"
       },
       many: true
-    },
-    entry_text_blob_sha256: {
-      type: "string"
     }
   },
   LegacyBlock: {
@@ -102038,9 +102047,6 @@ var TYPES = {
     ordinal: {
       type: "integer",
       required: true
-    },
-    text_blob_sha256: {
-      type: "string"
     }
   },
   LossItem: {
@@ -102371,178 +102377,6 @@ var TYPES = {
       type: "string"
     }
   },
-  Capture: {
-    schema: {
-      type: "string",
-      required: true,
-      values: [
-        "stemma.record/0"
-      ]
-    },
-    id: {
-      type: "string",
-      required: true
-    },
-    created: {
-      type: {
-        value: "Stamp"
-      },
-      required: true
-    },
-    changed: {
-      type: {
-        value: "Stamp"
-      }
-    },
-    retired: {
-      type: {
-        value: "Retirement"
-      }
-    },
-    legacy: {
-      type: {
-        value: "LegacyEntry"
-      },
-      many: true
-    },
-    kind: {
-      type: "string",
-      required: true,
-      values: [
-        "capture"
-      ]
-    },
-    source: {
-      type: "string",
-      required: true
-    },
-    sha256: {
-      type: "string",
-      required: true
-    },
-    size: {
-      type: "integer",
-      required: true
-    },
-    media_type: {
-      type: "string",
-      required: true
-    },
-    origin: {
-      type: "string",
-      required: true
-    },
-    acquired_at: {
-      type: "date-time",
-      required: true
-    },
-    source_version: {
-      type: "string"
-    },
-    admitted_by: {
-      type: {
-        value: "Actor"
-      },
-      required: true
-    },
-    url: {
-      type: "string"
-    },
-    shelfmark: {
-      type: "string"
-    }
-  },
-  Extraction: {
-    schema: {
-      type: "string",
-      required: true,
-      values: [
-        "stemma.record/0"
-      ]
-    },
-    id: {
-      type: "string",
-      required: true
-    },
-    created: {
-      type: {
-        value: "Stamp"
-      },
-      required: true
-    },
-    changed: {
-      type: {
-        value: "Stamp"
-      }
-    },
-    retired: {
-      type: {
-        value: "Retirement"
-      }
-    },
-    legacy: {
-      type: {
-        value: "LegacyEntry"
-      },
-      many: true
-    },
-    kind: {
-      type: "string",
-      required: true,
-      values: [
-        "extraction"
-      ]
-    },
-    capture: {
-      type: "string",
-      required: true
-    },
-    capture_sha256: {
-      type: "string",
-      required: true
-    },
-    tool: {
-      type: {
-        value: "ToolRef"
-      },
-      required: true
-    },
-    normalization_profile: {
-      type: "string",
-      required: true
-    },
-    text_sha256: {
-      type: "string",
-      required: true
-    },
-    text_size: {
-      type: "integer",
-      required: true
-    },
-    pages: {
-      type: {
-        value: "PageSegment"
-      },
-      many: true
-    },
-    quality: {
-      type: {
-        value: "ExtractionQuality"
-      },
-      required: true
-    },
-    page_spans: {
-      type: {
-        value: "PageSpan"
-      },
-      many: true
-    },
-    metadata: {
-      type: {
-        value: "HeldMetadata"
-      }
-    }
-  },
   Passage: {
     schema: {
       type: "string",
@@ -102588,28 +102422,11 @@ var TYPES = {
       type: "string",
       required: true
     },
-    capture: {
-      type: "string",
-      required: true
-    },
-    extraction: {
-      type: "string",
-      required: true
-    },
-    text_sha256: {
-      type: "string",
-      required: true
-    },
     quote: {
       type: {
         value: "QuoteSelector"
       },
       required: true
-    },
-    position: {
-      type: {
-        value: "PositionSelector"
-      }
     },
     region: {
       type: {
@@ -102629,6 +102446,16 @@ var TYPES = {
     },
     source_record_sha256: {
       type: "string"
+    },
+    text: {
+      type: "string",
+      required: true
+    },
+    anchor: {
+      type: {
+        value: "PageAnchor"
+      },
+      many: true
     }
   },
   Note: {
@@ -103238,6 +103065,9 @@ var TYPES = {
         "resolved",
         "confirmed"
       ]
+    },
+    passage: {
+      type: "string"
     }
   },
   Place: {
@@ -103786,10 +103616,6 @@ var TYPES = {
       type: "string",
       required: true
     },
-    capture_sha256: {
-      type: "string",
-      required: true
-    },
     model: {
       type: "string",
       required: true
@@ -103839,6 +103665,10 @@ var TYPES = {
         value: "Stamp"
       },
       required: true
+    },
+    page_sha256: {
+      type: "string",
+      many: true
     }
   },
   Annotation: {
@@ -104246,6 +104076,22 @@ var TYPES = {
         value: "BibField"
       },
       many: true
+    },
+    identifier: {
+      type: {
+        value: "Identifier"
+      }
+    },
+    url: {
+      type: "string"
+    },
+    response: {
+      type: "string"
+    },
+    found: {
+      type: {
+        value: "TextIdentity"
+      }
     }
   },
   ImportBatch: {
@@ -104393,35 +104239,6 @@ var TYPES = {
       type: "string"
     }
   },
-  PageSpan: {
-    page_index: {
-      type: "integer",
-      required: true
-    },
-    start: {
-      type: "integer",
-      required: true
-    },
-    end: {
-      type: "integer",
-      required: true
-    }
-  },
-  HeldMetadata: {
-    title: {
-      type: "string"
-    },
-    contributors: {
-      type: "string",
-      many: true
-    },
-    issued: {
-      type: "string"
-    },
-    venue: {
-      type: "string"
-    }
-  },
   CandidateOrigin: {
     source: {
       type: "string",
@@ -104475,97 +104292,6 @@ var TYPES = {
     },
     checkpoints: {
       type: "integer"
-    }
-  },
-  Confirmation: {
-    schema: {
-      type: "string",
-      required: true,
-      values: [
-        "stemma.record/0"
-      ]
-    },
-    id: {
-      type: "string",
-      required: true
-    },
-    created: {
-      type: {
-        value: "Stamp"
-      },
-      required: true
-    },
-    changed: {
-      type: {
-        value: "Stamp"
-      }
-    },
-    retired: {
-      type: {
-        value: "Retirement"
-      }
-    },
-    legacy: {
-      type: {
-        value: "LegacyEntry"
-      },
-      many: true
-    },
-    kind: {
-      type: "string",
-      required: true,
-      values: [
-        "confirmation"
-      ]
-    },
-    source: {
-      type: "string",
-      required: true
-    },
-    capture: {
-      type: "string",
-      required: true
-    },
-    page_indexes: {
-      type: "integer",
-      required: true,
-      many: true
-    },
-    page_basis: {
-      type: "string",
-      required: true,
-      values: [
-        "title_page",
-        "equivalent"
-      ]
-    },
-    fields: {
-      type: "string",
-      required: true,
-      many: true,
-      values: [
-        "contributions",
-        "title",
-        "issued",
-        "venue"
-      ]
-    },
-    source_record_sha256: {
-      type: "string",
-      required: true
-    },
-    capture_sha256: {
-      type: "string",
-      required: true
-    },
-    note: {
-      type: "string"
-    },
-    confirmed: {
-      type: {
-        value: "Stamp"
-      },
-      required: true
     }
   },
   Plan: {
@@ -105366,10 +105092,6 @@ var TYPES = {
         "image"
       ]
     },
-    blob_sha256: {
-      type: "string",
-      required: true
-    },
     figure_id: {
       type: "string"
     },
@@ -105391,6 +105113,13 @@ var TYPES = {
       type: "string"
     },
     alt: {
+      type: "string"
+    },
+    file_sha256: {
+      type: "string",
+      required: true
+    },
+    file_path: {
       type: "string"
     }
   },
@@ -105459,13 +105188,779 @@ var TYPES = {
       },
       required: true
     }
+  },
+  TextIdentity: {
+    title: {
+      type: "string"
+    },
+    subtitle: {
+      type: "string"
+    },
+    contributors: {
+      type: "string",
+      many: true
+    },
+    issued: {
+      type: "string"
+    },
+    edition: {
+      type: "string"
+    },
+    publisher: {
+      type: "string"
+    },
+    place: {
+      type: "string"
+    },
+    venue: {
+      type: "string"
+    },
+    identifiers: {
+      type: {
+        value: "Identifier"
+      },
+      many: true
+    },
+    title_pages: {
+      type: "integer",
+      many: true
+    },
+    basis: {
+      type: "string"
+    }
+  },
+  OriginalFile: {
+    sha256: {
+      type: "string",
+      required: true
+    },
+    size: {
+      type: "integer",
+      required: true
+    },
+    media_type: {
+      type: "string",
+      required: true
+    },
+    index: {
+      type: "integer"
+    }
+  },
+  Original: {
+    form: {
+      type: "string",
+      required: true,
+      values: [
+        "file",
+        "page_images",
+        "physical"
+      ]
+    },
+    files: {
+      type: {
+        value: "OriginalFile"
+      },
+      many: true
+    },
+    page_count: {
+      type: "integer"
+    },
+    description: {
+      type: "string"
+    },
+    held_at: {
+      type: "string"
+    },
+    obtained_from: {
+      type: "string",
+      required: true
+    },
+    acquired_at: {
+      type: "date-time",
+      required: true
+    },
+    version: {
+      type: "string"
+    }
+  },
+  TextConversion: {
+    method: {
+      type: "string",
+      required: true,
+      values: [
+        "born_text",
+        "text_layer",
+        "markup",
+        "ocr",
+        "manual"
+      ]
+    },
+    tools: {
+      type: {
+        value: "ToolRef"
+      },
+      many: true
+    },
+    recognition: {
+      type: "string"
+    },
+    level: {
+      type: "string",
+      required: true,
+      values: [
+        "unassessed",
+        "good",
+        "fair",
+        "poor"
+      ]
+    },
+    scripts: {
+      type: "string",
+      many: true
+    },
+    note: {
+      type: "string"
+    }
+  },
+  PageEntry: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    file: {
+      type: "string",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    }
+  },
+  SourceText: {
+    schema: {
+      type: "string",
+      required: true,
+      values: [
+        "stemma.record/0"
+      ]
+    },
+    id: {
+      type: "string",
+      required: true
+    },
+    created: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    changed: {
+      type: {
+        value: "Stamp"
+      }
+    },
+    retired: {
+      type: {
+        value: "Retirement"
+      }
+    },
+    legacy: {
+      type: {
+        value: "LegacyEntry"
+      },
+      many: true
+    },
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "source_text"
+      ]
+    },
+    source: {
+      type: "string",
+      required: true
+    },
+    identity: {
+      type: {
+        value: "TextIdentity"
+      }
+    },
+    original: {
+      type: {
+        value: "Original"
+      },
+      required: true
+    },
+    conversion: {
+      type: {
+        value: "TextConversion"
+      },
+      required: true
+    },
+    paged: {
+      type: "boolean",
+      required: true
+    },
+    coverage: {
+      type: "string",
+      required: true,
+      values: [
+        "all",
+        "partial"
+      ]
+    },
+    coverage_note: {
+      type: "string"
+    },
+    pages: {
+      type: {
+        value: "PageEntry"
+      },
+      many: true
+    }
+  },
+  SourcePage: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    label_status: {
+      type: "string",
+      required: true,
+      values: [
+        "labelled",
+        "none",
+        "unreadable",
+        "undetermined",
+        "unpaged"
+      ]
+    },
+    section: {
+      type: "string"
+    },
+    chapter: {
+      type: "string"
+    },
+    label: {
+      type: "string"
+    },
+    label_basis: {
+      type: "string",
+      values: [
+        "printed_sequence",
+        "embedded_label",
+        "source_marker",
+        "page_image",
+        "author_statement"
+      ]
+    },
+    method: {
+      type: "string",
+      required: true,
+      values: [
+        "born_text",
+        "text_layer",
+        "markup",
+        "ocr",
+        "manual"
+      ]
+    },
+    level: {
+      type: "string",
+      required: true,
+      values: [
+        "unassessed",
+        "good",
+        "fair",
+        "poor"
+      ]
+    },
+    columns: {
+      type: "string",
+      required: true,
+      values: [
+        "1",
+        "2",
+        "undetermined"
+      ]
+    },
+    undetermined: {
+      type: "string",
+      many: true,
+      values: [
+        "paragraphs",
+        "headings",
+        "footnotes",
+        "block-quotes",
+        "tables",
+        "captions",
+        "figures",
+        "running-heads",
+        "folio",
+        "reading-order"
+      ]
+    },
+    note: {
+      type: "string"
+    },
+    removed: {
+      type: {
+        value: "Removal"
+      },
+      many: true
+    }
+  },
+  Removal: {
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "download_stamp"
+      ]
+    },
+    rule: {
+      type: "string",
+      required: true,
+      values: [
+        "annual_reviews",
+        "jstor",
+        "taylor_francis",
+        "wiley"
+      ]
+    },
+    rules_version: {
+      type: "string",
+      required: true
+    }
+  },
+  AuxiliaryFile: {
+    role: {
+      type: "string",
+      required: true,
+      values: [
+        "page_numbers",
+        "alternative_text"
+      ]
+    },
+    url: {
+      type: "string",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    },
+    size: {
+      type: "integer",
+      required: true
+    }
+  },
+  LookupRequest: {
+    resolver: {
+      type: "string",
+      required: true,
+      values: [
+        "crossref",
+        "internet_archive",
+        "gutenberg"
+      ]
+    },
+    identifier: {
+      type: {
+        value: "Identifier"
+      },
+      required: true
+    }
+  },
+  Upstream: {
+    schema: {
+      type: "string",
+      required: true,
+      values: [
+        "stemma.record/0"
+      ]
+    },
+    id: {
+      type: "string",
+      required: true
+    },
+    created: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    changed: {
+      type: {
+        value: "Stamp"
+      }
+    },
+    retired: {
+      type: {
+        value: "Retirement"
+      }
+    },
+    legacy: {
+      type: {
+        value: "LegacyEntry"
+      },
+      many: true
+    },
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "upstream"
+      ]
+    },
+    source: {
+      type: "string",
+      required: true
+    },
+    url: {
+      type: "string"
+    },
+    retrieved_at: {
+      type: "date-time",
+      required: true
+    },
+    retrieved_by: {
+      type: {
+        value: "Actor"
+      },
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    },
+    size: {
+      type: "integer",
+      required: true
+    },
+    media_type: {
+      type: "string",
+      required: true
+    },
+    version: {
+      type: "string"
+    },
+    identifiers: {
+      type: {
+        value: "Identifier"
+      },
+      many: true
+    },
+    auxiliary: {
+      type: {
+        value: "AuxiliaryFile"
+      },
+      many: true
+    },
+    lookups: {
+      type: {
+        value: "LookupRequest"
+      },
+      many: true
+    },
+    note: {
+      type: "string"
+    }
+  },
+  PageAnchor: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    page_sha256: {
+      type: "string",
+      required: true
+    },
+    stream: {
+      type: "string",
+      required: true,
+      values: [
+        "main",
+        "notes"
+      ]
+    },
+    start: {
+      type: "integer",
+      required: true
+    },
+    end: {
+      type: "integer",
+      required: true
+    }
+  },
+  ReviewedPage: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    }
+  },
+  ReviewFlag: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    reading: {
+      type: "string",
+      required: true
+    },
+    suggested: {
+      type: "string"
+    },
+    note: {
+      type: "string"
+    }
+  },
+  TextReview: {
+    schema: {
+      type: "string",
+      required: true,
+      values: [
+        "stemma.record/0"
+      ]
+    },
+    id: {
+      type: "string",
+      required: true
+    },
+    created: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    changed: {
+      type: {
+        value: "Stamp"
+      }
+    },
+    retired: {
+      type: {
+        value: "Retirement"
+      }
+    },
+    legacy: {
+      type: {
+        value: "LegacyEntry"
+      },
+      many: true
+    },
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "text_review"
+      ]
+    },
+    source: {
+      type: "string",
+      required: true
+    },
+    text: {
+      type: "string",
+      required: true
+    },
+    scope: {
+      type: "string",
+      required: true,
+      values: [
+        "whole_page",
+        "passage",
+        "quotations",
+        "page_number",
+        "source_details"
+      ]
+    },
+    pages: {
+      type: {
+        value: "ReviewedPage"
+      },
+      many: true
+    },
+    passage: {
+      type: "string"
+    },
+    fields: {
+      type: "string",
+      many: true
+    },
+    against: {
+      type: "string",
+      required: true
+    },
+    original_sha256: {
+      type: "string"
+    },
+    reviewed: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    outcome: {
+      type: "string",
+      required: true,
+      values: [
+        "agrees",
+        "corrected",
+        "disagrees",
+        "flagged"
+      ]
+    },
+    flags: {
+      type: {
+        value: "ReviewFlag"
+      },
+      many: true
+    },
+    note: {
+      type: "string"
+    },
+    source_record_sha256: {
+      type: "string"
+    }
+  },
+  ReadingDifference: {
+    reading: {
+      type: "string",
+      required: true
+    },
+    other: {
+      type: "string",
+      required: true
+    }
+  },
+  PageAgreement: {
+    index: {
+      type: "integer",
+      required: true
+    },
+    sha256: {
+      type: "string",
+      required: true
+    },
+    agreement_permille: {
+      type: "integer",
+      required: true
+    },
+    words: {
+      type: "integer",
+      required: true
+    },
+    differing_words: {
+      type: "integer",
+      required: true
+    },
+    differences: {
+      type: {
+        value: "ReadingDifference"
+      },
+      many: true
+    }
+  },
+  ComparisonRun: {
+    schema: {
+      type: "string",
+      required: true,
+      values: [
+        "stemma.record/0"
+      ]
+    },
+    id: {
+      type: "string",
+      required: true
+    },
+    created: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    changed: {
+      type: {
+        value: "Stamp"
+      }
+    },
+    retired: {
+      type: {
+        value: "Retirement"
+      }
+    },
+    legacy: {
+      type: {
+        value: "LegacyEntry"
+      },
+      many: true
+    },
+    kind: {
+      type: "string",
+      required: true,
+      values: [
+        "comparison_run"
+      ]
+    },
+    source: {
+      type: "string",
+      required: true
+    },
+    text: {
+      type: "string",
+      required: true
+    },
+    method: {
+      type: "string",
+      required: true,
+      values: [
+        "reconversion",
+        "supplied_text"
+      ]
+    },
+    independent: {
+      type: "boolean",
+      required: true
+    },
+    tools: {
+      type: {
+        value: "ToolRef"
+      },
+      many: true
+    },
+    against: {
+      type: "string",
+      required: true
+    },
+    other_sha256: {
+      type: "string"
+    },
+    original_sha256: {
+      type: "string"
+    },
+    run: {
+      type: {
+        value: "Stamp"
+      },
+      required: true
+    },
+    pages: {
+      type: {
+        value: "PageAgreement"
+      },
+      many: true
+    }
   }
 };
 var KIND_TYPES = {
   source: "Source",
   agent: "Agent",
-  capture: "Capture",
-  extraction: "Extraction",
   passage: "Passage",
   note: "Note",
   claim: "Claim",
@@ -105488,7 +105983,6 @@ var KIND_TYPES = {
   review_comment: "ReviewComment",
   resolution: "Resolution",
   import_batch: "ImportBatch",
-  confirmation: "Confirmation",
   plan: "Plan",
   checkpoint_input: "CheckpointInput",
   authorship_mark: "AuthorshipMark",
@@ -105501,7 +105995,11 @@ var KIND_TYPES = {
   audit_finding: "AuditFinding",
   review_baseline: "ReviewBaseline",
   image: "Image",
-  conversion: "Conversion"
+  conversion: "Conversion",
+  source_text: "SourceText",
+  upstream: "Upstream",
+  text_review: "TextReview",
+  comparison_run: "ComparisonRun"
 };
 var REFERENCES = {
   "source.created.import": [
@@ -105534,36 +106032,6 @@ var REFERENCES = {
   "agent.legacy.import": [
     "import_batch"
   ],
-  "capture.created.import": [
-    "import_batch"
-  ],
-  "capture.changed.import": [
-    "import_batch"
-  ],
-  "capture.retired.stamp.import": [
-    "import_batch"
-  ],
-  "capture.legacy.import": [
-    "import_batch"
-  ],
-  "capture.source": [
-    "source"
-  ],
-  "extraction.created.import": [
-    "import_batch"
-  ],
-  "extraction.changed.import": [
-    "import_batch"
-  ],
-  "extraction.retired.stamp.import": [
-    "import_batch"
-  ],
-  "extraction.legacy.import": [
-    "import_batch"
-  ],
-  "extraction.capture": [
-    "capture"
-  ],
   "passage.created.import": [
     "import_batch"
   ],
@@ -105578,12 +106046,6 @@ var REFERENCES = {
   ],
   "passage.source": [
     "source"
-  ],
-  "passage.capture": [
-    "capture"
-  ],
-  "passage.extraction": [
-    "extraction"
   ],
   "passage.quoted_from.source": [
     "source"
@@ -105939,8 +106401,6 @@ var REFERENCES = {
     "construct",
     "note",
     "agent",
-    "capture",
-    "extraction",
     "passage",
     "attestation",
     "inference",
@@ -105959,7 +106419,6 @@ var REFERENCES = {
     "review_comment",
     "resolution",
     "import_batch",
-    "confirmation",
     "plan",
     "checkpoint_input",
     "authorship_mark",
@@ -105972,10 +106431,14 @@ var REFERENCES = {
     "audit_finding",
     "review_baseline",
     "image",
-    "conversion"
+    "conversion",
+    "source_text",
+    "upstream",
+    "text_review",
+    "comparison_run"
   ],
-  "annotation.compared.extraction": [
-    "extraction"
+  "annotation.compared.text": [
+    "source_text"
   ],
   "annotation.written.import": [
     "import_batch"
@@ -106076,12 +106539,6 @@ var REFERENCES = {
   "search.candidate_origins.source": [
     "source"
   ],
-  "confirmation.source": [
-    "source"
-  ],
-  "confirmation.capture": [
-    "capture"
-  ],
   "plan.chapter": [
     "chapter"
   ],
@@ -106136,8 +106593,6 @@ var REFERENCES = {
   "ai_activity.records": [
     "source",
     "agent",
-    "capture",
-    "extraction",
     "passage",
     "note",
     "claim",
@@ -106160,7 +106615,6 @@ var REFERENCES = {
     "review_comment",
     "resolution",
     "import_batch",
-    "confirmation",
     "plan",
     "checkpoint_input",
     "authorship_mark",
@@ -106173,19 +106627,17 @@ var REFERENCES = {
     "audit_finding",
     "review_baseline",
     "image",
-    "conversion"
+    "conversion",
+    "source_text",
+    "upstream",
+    "text_review",
+    "comparison_run"
   ],
   "source.retired.replaced_by": [
     "source"
   ],
   "agent.retired.replaced_by": [
     "agent"
-  ],
-  "capture.retired.replaced_by": [
-    "capture"
-  ],
-  "extraction.retired.replaced_by": [
-    "extraction"
   ],
   "passage.retired.replaced_by": [
     "passage"
@@ -106251,24 +106703,6 @@ var REFERENCES = {
     "resolution"
   ],
   "import_batch.retired.replaced_by": [
-    "import_batch"
-  ],
-  "confirmation.created.import": [
-    "import_batch"
-  ],
-  "confirmation.changed.import": [
-    "import_batch"
-  ],
-  "confirmation.retired.stamp.import": [
-    "import_batch"
-  ],
-  "confirmation.retired.replaced_by": [
-    "confirmation"
-  ],
-  "confirmation.legacy.import": [
-    "import_batch"
-  ],
-  "confirmation.confirmed.import": [
     "import_batch"
   ],
   "plan.created.import": [
@@ -106495,6 +106929,93 @@ var REFERENCES = {
   ],
   "project.bibliography_include": [
     "source"
+  ],
+  "source_text.created.import": [
+    "import_batch"
+  ],
+  "source_text.changed.import": [
+    "import_batch"
+  ],
+  "source_text.retired.stamp.import": [
+    "import_batch"
+  ],
+  "source_text.legacy.import": [
+    "import_batch"
+  ],
+  "source_text.retired.replaced_by": [
+    "source_text"
+  ],
+  "source_text.source": [
+    "source"
+  ],
+  "upstream.created.import": [
+    "import_batch"
+  ],
+  "upstream.changed.import": [
+    "import_batch"
+  ],
+  "upstream.retired.stamp.import": [
+    "import_batch"
+  ],
+  "upstream.legacy.import": [
+    "import_batch"
+  ],
+  "upstream.retired.replaced_by": [
+    "upstream"
+  ],
+  "upstream.source": [
+    "source"
+  ],
+  "text_review.created.import": [
+    "import_batch"
+  ],
+  "text_review.changed.import": [
+    "import_batch"
+  ],
+  "text_review.retired.stamp.import": [
+    "import_batch"
+  ],
+  "text_review.legacy.import": [
+    "import_batch"
+  ],
+  "text_review.retired.replaced_by": [
+    "text_review"
+  ],
+  "text_review.source": [
+    "source"
+  ],
+  "comparison_run.created.import": [
+    "import_batch"
+  ],
+  "comparison_run.changed.import": [
+    "import_batch"
+  ],
+  "comparison_run.retired.stamp.import": [
+    "import_batch"
+  ],
+  "comparison_run.legacy.import": [
+    "import_batch"
+  ],
+  "comparison_run.retired.replaced_by": [
+    "comparison_run"
+  ],
+  "comparison_run.source": [
+    "source"
+  ],
+  "citation.passage": [
+    "passage"
+  ],
+  "passage.text": [
+    "source_text"
+  ],
+  "text_review.text": [
+    "source_text"
+  ],
+  "text_review.passage": [
+    "passage"
+  ],
+  "comparison_run.text": [
+    "source_text"
   ]
 };
 
@@ -106591,16 +107112,33 @@ function checkRules(record, problems) {
       });
     }
   }
-  if (record.kind === "capture" || record.kind === "extraction") {
-    const field = record.kind === "capture" ? "size" : "text_size";
-    if (typeof record[field] === "number" && record[field] < 0)
-      problems.push(invalid("bad_size", `/${field}`));
+  const size = (value, field) => {
+    if (typeof value === "number" && value < 0)
+      problems.push(invalid("bad_size", field));
+  };
+  if (record.kind === "upstream")
+    size(record.size, "/size");
+  if (record.kind === "source_text" && isObject(record.original)) {
+    const { form, files, description, held_at: held } = record.original;
+    const list = Array.isArray(files) ? files : [];
+    list.forEach((f, i) => size(isObject(f) ? f.size : undefined, `/original/files/${i}/size`));
+    if (form === "physical" ? list.length > 0 || typeof description !== "string" || typeof held !== "string" : list.length === 0) {
+      problems.push(invalid("bad_original", "/original"));
+    }
   }
-  if (record.kind === "extraction") {
-    for (const { code, index } of checkPageSegments(record.pages ?? []))
-      problems.push(invalid(code, `/pages/${index}`));
-    for (const index of checkPageSpans(record.page_spans ?? []))
-      problems.push(invalid("bad_page_spans", `/page_spans/${index}`));
+  if (record.kind === "text_review") {
+    const reviewed = isObject(record.reviewed) && isObject(record.reviewed.by) ? record.reviewed.by.kind : undefined;
+    if (reviewed === "model" && record.outcome !== "flagged")
+      problems.push(invalid("model_verification", "/outcome"));
+  }
+  if (record.kind === "resolution" && typeof record.response === "string" && typeof record.response_sha256 === "string" && sha256(record.response) !== record.response_sha256) {
+    problems.push(invalid("response_digest_mismatch", "/response_sha256"));
+  }
+  if (record.kind === "passage") {
+    const anchor = Array.isArray(record.anchor) ? record.anchor : [];
+    if (anchor.length === 0 || anchor.some((a) => !isObject(a) || !(Number(a.end) > Number(a.start)) || Number(a.start) < 0)) {
+      problems.push(invalid("bad_address", "/anchor"));
+    }
   }
   if (record.kind === "citation" && isObject(record.sentence)) {
     const { text, sha256: stated } = record.sentence;
@@ -106619,13 +107157,15 @@ function validateRecord(record, path) {
   if (!isObject(record))
     return { problems: [invalid("not_an_object", "")], references };
   const kind = typeof record.kind === "string" ? record.kind : "";
-  if (!Object.hasOwn(KINDS, kind))
+  const manifest = path.startsWith("sources/");
+  if (!Object.hasOwn(KINDS, kind) || manifest !== (kind === "source_text")) {
     return { problems: [invalid("unknown_kind", "/kind")], references };
+  }
   checkShape(KIND_TYPES[kind], record, "", kind, problems, references);
   if (typeof record.id === "string") {
     if (!isRecordId(kind, record.id))
       problems.push(invalid("bad_id", "/id"));
-    const expected = `records/${KINDS[kind].directory}/${record.id}.json`;
+    const expected = manifest ? path : recordPath(kind, record.id);
     if (path !== expected) {
       const problem = { reason: "record_misplaced", code: "wrong_location", field: "/id" };
       if (isRecordId(kind, record.id))
@@ -106635,6 +107175,21 @@ function validateRecord(record, path) {
   }
   checkRules(record, problems);
   return { problems, references };
+}
+function validatePart(front, paged) {
+  const problems = [];
+  checkShape("SourcePage", front, "", "source_page", problems, []);
+  if (!isObject(front))
+    return problems;
+  const { label_status: status, label, label_basis: basis } = front;
+  const bad = (field) => problems.push(invalid("bad_page_label", field));
+  if (status === "labelled" !== (typeof label === "string" && label !== ""))
+    bad("/label");
+  if (status === "unpaged" === paged)
+    bad("/label_status");
+  if ((status === "labelled" || status === "none" || status === "unreadable") !== (basis !== undefined))
+    bad("/label_basis");
+  return problems;
 }
 function validateProject(settings) {
   const problems = [];
@@ -106752,25 +107307,176 @@ function checkReferences(file, byId, unreadableIds) {
       file.problems.push({ reason: "reference_dangling", code, field: reference.field, target: reference.id });
   }
 }
-function checkExtractions(records, byId) {
-  for (const file of records) {
-    if (file.state !== "ok" || file.data?.kind !== "extraction")
+var blocking = (problems) => problems.some((p) => p.reason === "record_invalid");
+var textOf = (file) => {
+  if (!file.bytes)
+    return;
+  try {
+    return decodeUtf8(file.bytes);
+  } catch {
+    return;
+  }
+};
+function loadManifest(file) {
+  const base = { path: file.path, state: "unreadable", formattable: false, problems: [], references: [] };
+  if (file.bytes)
+    base.bytes = file.bytes;
+  const text = textOf(file);
+  if (text === undefined)
+    return { loaded: { ...base, unreadable: file.bytes ? "not_utf8" : "cannot_open" } };
+  const split = splitFrontMatter(text);
+  if ("problem" in split)
+    return { loaded: { ...base, unreadable: "syntax" } };
+  if (newerVersion(split.front.schema, RECORD_SCHEMA.split("/")[0]))
+    return { loaded: { ...base, state: "version_unsupported" } };
+  const validation = validateRecord(split.front, file.path);
+  return {
+    loaded: {
+      ...base,
+      state: "ok",
+      data: split.front,
+      formattable: true,
+      canonical: text.replace(/\r\n/g, `
+`) === serializeManifest(split.front, split.body),
+      problems: validation.problems,
+      references: validation.references
+    }
+  };
+}
+function loadPart(file, paged) {
+  const base = { path: file.path, state: "unreadable", formattable: false, problems: [], references: [] };
+  if (file.bytes)
+    base.bytes = file.bytes;
+  const text = textOf(file);
+  if (text === undefined)
+    return { loaded: { ...base, unreadable: file.bytes ? "not_utf8" : "cannot_open" } };
+  const split = splitFrontMatter(text);
+  if ("problem" in split)
+    return { loaded: { ...base, unreadable: "syntax" } };
+  const { blocks, problems: grammar } = parseBlocks(split.body, split.bodyLine);
+  const problems = [
+    ...validatePart(split.front, paged),
+    ...grammar.map((g) => ({ reason: "record_invalid", code: g.code, field: `line ${g.line}` }))
+  ];
+  const loaded = {
+    ...base,
+    state: "ok",
+    formattable: grammar.length === 0,
+    problems,
+    canonical: grammar.length > 0 || text.replace(/\r\n/g, `
+`) === serializePart(split.front, blocks)
+  };
+  return { loaded, part: { index: Number(split.front.index), path: file.path, front: split.front, blocks } };
+}
+function loadText(directory, files, manifest) {
+  const data = manifest.data ?? {};
+  const paged = data.paged === true;
+  const damage = [];
+  const parts = [];
+  const partFiles = [];
+  const listed = new Set;
+  const entries = (Array.isArray(data.pages) ? data.pages : []).filter(isObject);
+  let previous = -1;
+  for (const entry of entries) {
+    const index = Number(entry.index);
+    const path = `${directory}/${String(entry.file)}`;
+    if (index <= previous || !paged && index !== previous + 1)
+      damage.push({ code: "part_sequence", path, detail: `index ${index} after ${previous}` });
+    previous = index;
+    if (String(entry.file) !== partFile(paged, index))
+      damage.push({ code: "part_index", path, detail: `listed as index ${index}` });
+    const file = files.get(path);
+    listed.add(path);
+    if (!file) {
+      damage.push({ code: "part_missing", path, detail: `index ${index}` });
       continue;
-    const capture = byId.get(String(file.data.capture));
-    if (capture?.data?.kind !== "capture")
-      continue;
-    const add = (code, field) => file.problems.push({ reason: "record_invalid", code, field, target: capture.path });
-    if (file.data.capture_sha256 !== capture.data.sha256)
-      add("capture_digest_mismatch", "/capture_sha256");
-    const spans = file.data.page_spans;
-    if (capture.data.media_type === "application/pdf" && !(Array.isArray(spans) && spans.length > 0)) {
-      add("missing_page_spans", "/page_spans");
+    }
+    const { loaded, part } = loadPart(file, paged);
+    partFiles.push(loaded);
+    const text = textOf(file);
+    if (text === undefined || fileDigest(text) !== entry.sha256)
+      damage.push({ code: "part_edited", path, detail: `index ${index}` });
+    if (!part)
+      damage.push({ code: "part_unreadable", path });
+    else {
+      if (part.index !== index)
+        damage.push({ code: "part_index", path, detail: `the part says index ${part.index}` });
+      parts.push({ ...part, index });
     }
   }
+  const original = isObject(data.original) ? data.original : {};
+  if (paged && data.coverage === "all" && typeof original.page_count === "number") {
+    const have = new Set(entries.map((e) => Number(e.index)));
+    const missing = Array.from({ length: Math.min(original.page_count, 1e5) }, (_, i) => i).filter((i) => !have.has(i));
+    if (missing.length > 0 || have.size !== original.page_count) {
+      damage.push({
+        code: "page_count",
+        path: manifest.path,
+        detail: `the original has ${original.page_count} pages and ${have.size} are listed${missing.length > 0 ? `; missing index ${missing.slice(0, 20).join(", ")}` : ""}`
+      });
+    }
+  }
+  const strays = [];
+  for (const [path, file] of files) {
+    if (listed.has(path) || path === manifest.path)
+      continue;
+    if (/^(pages\/p|sections\/s)\d{4,}\.md$/.test(path.slice(directory.length + 1))) {
+      damage.push({ code: "part_unlisted", path });
+      partFiles.push(loadPart(file, paged).loaded);
+    } else
+      strays.push(file);
+  }
+  const usable = manifest.state === "ok" && !blocking(manifest.problems) && damage.length === 0 && partFiles.every((f) => f.state === "ok" && !blocking(f.problems));
+  return { text: { manifest, directory, parts, damage, usable }, partFiles, strays };
+}
+function loadSources(sources) {
+  const directories = new Map;
+  const strays = [];
+  for (const file of sources) {
+    const [, name, ...rest] = file.path.split("/");
+    if (rest.length === 0 || !SOURCE_DIRECTORY_NAME.test(name))
+      strays.push(file);
+    else {
+      const directory = `sources/${name}`;
+      directories.set(directory, (directories.get(directory) ?? new Map).set(file.path, file));
+    }
+  }
+  const manifests = [];
+  const texts = [];
+  const partFiles = [];
+  for (const [directory, files] of [...directories].sort(([a], [b]) => compareCodePoints(a, b))) {
+    const source = files.get(`${directory}/source.md`);
+    if (!source) {
+      strays.push(...files.values());
+      continue;
+    }
+    const { loaded } = loadManifest(source);
+    manifests.push(loaded);
+    if (loaded.state !== "ok")
+      continue;
+    const made = loadText(directory, files, loaded);
+    texts.push(made.text);
+    partFiles.push(...made.partFiles);
+    strays.push(...made.strays);
+  }
+  const stray = strays.map((file) => ({
+    path: file.path,
+    state: "stray",
+    formattable: false,
+    references: [],
+    problems: [{ reason: "record_misplaced", code: "stray_file", field: "" }],
+    ...file.bytes ? { bytes: file.bytes } : {}
+  }));
+  return { manifests, texts, partFiles, stray };
 }
 function loadCorpus(content) {
   const settings = loadFile(content.settings, "project");
-  const records = [...content.records].sort((a, b) => compareCodePoints(a.path, b.path)).map((file) => loadFile(file, "record"));
+  const found = loadSources(content.sources);
+  const records = [
+    ...content.records.map((file) => loadFile(file, "record")),
+    ...found.manifests,
+    ...found.stray
+  ].sort((a, b) => compareCodePoints(a.path, b.path));
   const byId = new Map;
   const unreadableIds = new Set;
   for (const file of records) {
@@ -106790,17 +107496,20 @@ function loadCorpus(content) {
   checkKeys(records.filter((f) => f.state === "ok" && f.data?.kind === "source"));
   for (const file of [settings, ...records])
     checkReferences(file, byId, unreadableIds);
-  checkExtractions(records, byId);
-  const corpus = { settings, records, byId, manuscript: content.manuscript };
+  const texts = new Map(found.texts.flatMap((t) => idOf(t.manifest) ? [[idOf(t.manifest), t]] : []));
+  const corpus = { settings, records, partFiles: found.partFiles, texts, sources: content.sources, byId, manuscript: content.manuscript, research: content.research };
   if (content.rules)
     corpus.rules = content.rules;
   return corpus;
 }
 function corpusDigest(corpus) {
-  const lines = [corpus.settings, ...corpus.records].map((file) => [
+  const lines = [corpus.settings, ...corpus.records.filter((f) => !f.path.startsWith("sources/"))].map((file) => [
     file.path,
     file.data ? digest(file.data) : file.bytes ? sha256(file.bytes) : "unreadable"
   ]);
+  for (const file of corpus.sources) {
+    lines.push([file.path, file.bytes ? fileDigest(new TextDecoder().decode(file.bytes)) : "unreadable"]);
+  }
   if (corpus.rules) {
     const text = corpus.rules.bytes ? new TextDecoder().decode(corpus.rules.bytes).replace(/\r\n?/g, `
 `) : "unreadable";
@@ -106809,17 +107518,119 @@ function corpusDigest(corpus) {
   return sha256(lines.sort((a, b) => compareCodePoints(a[0], b[0])).map(([p, d]) => `${p}	${d}
 `).join(""));
 }
+// packages/records/src/pages.ts
+var ROMAN = [
+  [1000, "m"],
+  [900, "cm"],
+  [500, "d"],
+  [400, "cd"],
+  [100, "c"],
+  [90, "xc"],
+  [50, "l"],
+  [40, "xl"],
+  [10, "x"],
+  [9, "ix"],
+  [5, "v"],
+  [4, "iv"],
+  [1, "i"]
+];
+function toRoman(value) {
+  let left = value;
+  let out = "";
+  for (const [amount, letters] of ROMAN) {
+    while (left >= amount) {
+      out += letters;
+      left -= amount;
+    }
+  }
+  return out;
+}
+function fromRoman(text) {
+  let value = 0;
+  let at = 0;
+  for (const [amount, letters] of ROMAN) {
+    while (value < 5000 && text.startsWith(letters, at)) {
+      value += amount;
+      at += letters.length;
+    }
+  }
+  return value > 0 && at === text.length && toRoman(value) === text ? value : undefined;
+}
+function firstNumber(style, label) {
+  if (typeof label !== "string")
+    return;
+  if (style === "arabic")
+    return /^[1-9]\d{0,6}$/.test(label) ? Number(label) : undefined;
+  if (style === "roman_lower")
+    return fromRoman(label);
+  return label === label.toUpperCase() ? fromRoman(label.toLowerCase()) : undefined;
+}
+var isIndex = (value) => Number.isSafeInteger(value) && value >= 0;
+var asObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value) ? value : {};
+function checkPageSegments(pages) {
+  if (!Array.isArray(pages))
+    return [];
+  const problems = [];
+  const taken = [];
+  pages.forEach((entry, index) => {
+    const { first_index: first, last_index: last, style, first_label, labels, evidence } = asObject(entry);
+    const add = (code) => problems.push({ code, index });
+    if (!isIndex(first) || !isIndex(last) || last < first || taken.some(([a, b]) => first <= b && last >= a)) {
+      add("bad_page_range");
+      return;
+    }
+    taken.push([first, last]);
+    if (style === "unnumbered") {
+      if (first_label !== undefined || labels !== undefined)
+        add("bad_page_labels");
+      return;
+    }
+    if (style === "explicit") {
+      if (!Array.isArray(labels) || labels.length !== last - first + 1 || first_label !== undefined)
+        add("bad_page_labels");
+    } else if (typeof style === "string" && (labels !== undefined || firstNumber(style, first_label) === undefined)) {
+      add("bad_page_labels");
+    }
+    if (evidence === undefined)
+      add("label_evidence_missing");
+  });
+  return problems;
+}
+function pageLabels(segments) {
+  const labels = new Map;
+  for (const segment of segments) {
+    if (segment.style === "unnumbered")
+      continue;
+    const start = segment.style === "explicit" ? 0 : firstNumber(segment.style, segment.first_label);
+    if (start === undefined)
+      continue;
+    for (let i = segment.first_index;i <= segment.last_index; i++) {
+      const offset = i - segment.first_index;
+      const label = segment.style === "explicit" ? segment.labels?.[offset] : segment.style === "arabic" ? String(start + offset) : segment.style === "roman_lower" ? toRoman(start + offset) : toRoman(start + offset).toUpperCase();
+      if (label !== undefined)
+        labels.set(i, label);
+    }
+  }
+  return labels;
+}
 // packages/core/src/findings.ts
 function explain(message, why, suggestions, fixes = []) {
   return { message, why, suggestions, fixes };
 }
 var RECORD_WHY = "Every other check reads these files. A broken record can hide a citation problem or create a false one.";
-var HELD_WHY = "Without a stored copy and its text, nobody can compare this citation with the source, so it is unchecked.";
-var INTEGRITY_WHY = "The records describe one exact file. A missing or changed file cannot stand for it, so nothing that depends on it can be checked.";
+var HELD_WHY = "Without the source's text in the project, nobody can compare this citation with the source, so it is unchecked.";
+var STRUCTURE_WHY = "Every quotation and page check reads these files. A missing, reordered or changed part can hide or invent what the source says, so this source file is not used until it is sound.";
+var LABEL_WHY = "Citations name printed pages. A wrong page label makes a wrong page reference pass, or a right one fail.";
+var NOTE_WHY = "A marker without its note, or a note without its marker, suggests text was lost or put in the wrong stream in conversion.";
+var ORIGINAL_WHY = "The chain from the original to your citation rests on the source file being what the original gives.";
+var META_WHY = "A reference with the wrong author, title or year points readers to the wrong work, and is a common sign of an invented or confused citation.";
+var ID_WHY = "An identifier that resolves nowhere, or to another work, sends a reader to the wrong thing.";
+var NUMBER_WHY = "A figure attributed to a source that does not hold it misreports the source.";
 var KEY_WHY = "A reader or a build cannot tell which source this citation means, so it cannot be checked or put in the bibliography.";
 var CHANGED_WHY = "What you read, quoted or relied on may differ in what replaced it, so it needs looking at again.";
 var QUOTE_WHY = "Readers take quoted words to be the source's own. Words the source does not hold misreport it.";
-var UNCOMPARED_WHY = "Until the quotation can be compared with your copy's text, it is unchecked.";
+var UNCOMPARED_WHY = "Until the quotation can be compared with the source's text, it is unchecked.";
+var PAGE_WHY = "A reader who turns to the cited place and does not find the words cannot check them.";
 var LOCATOR_WHY = "A page or other locator that is not in the work sends a reader nowhere, and is a common sign of an invented or mistyped citation.";
 var UNLOCATED_WHY = "Until the locator can be compared with the work's pages or extent, a wrong one would go unnoticed.";
 var CHECK_FAILED = explain("The check itself failed while running, so this was not checked.", "This is a defect in Stemma, not a pass.", ["Report the defect together with the Stemma version."]);
@@ -106829,7 +107640,7 @@ var TEMPLATES = {
   "record.valid:version_unsupported": explain("A file was written in a newer record format than this version reads, so it was not checked.", RECORD_WHY, ["Update Stemma before changing this file. This version will not rewrite it."]),
   "record.valid:record_noncanonical": explain("A file is not written in the canonical form (key order, indentation or line endings differ).", "Digests, review marks and diffs depend on one exact form. No value is wrong because of this alone.", ["Run `fmt` on the file. It rewrites the layout and changes no value."], ["format"]),
   "record.valid:record_invalid": explain("A record breaks a rule of the record format.", RECORD_WHY, ["Correct the field named in the evidence, then run `check` again."]),
-  "record.valid:record_misplaced": explain("A file under records/ is not where its record belongs (file name or directory does not match).", "References and tools find records by ID, directory and file name.", ["Rename or move the file as the evidence shows, or move a file that is not a record out of records/."]),
+  "record.valid:record_misplaced": explain("A file under records/ or sources/ does not belong there: a name or directory that does not match, or a file such as a binary that a project does not hold.", "References and tools find records by ID, directory and file name.", ["Rename or move the file as the evidence shows, or move a file that does not belong out of the project. Originals are not kept in the repository."]),
   "record.valid:reference_dangling": explain("A record points at a record that is missing or is of the wrong kind.", "The link between your evidence and its source is broken, so anything relying on it cannot be traced.", ["Point the reference at the right record, or remove it."], ["repoint"]),
   "record.valid:unknown_field": explain("A record has a field the record format does not define. The field is kept as it is.", "A misspelled field name means the value you meant to record is not read.", ["Check the spelling. Put a field of your own under `x` with a namespaced name such as `myname.note`."]),
   "record.valid:rule_heading_invalid": explain("A heading in rules.md is not a rule heading.", "Reports and records cite standing rules by ID, so a rule without one cannot be cited.", ["Write each rule heading as `## RULE-001 Title`."]),
@@ -106845,32 +107656,75 @@ var TEMPLATES = {
   "bib.uncited:manuscript_not_read": explain("Whether a listed source is cited could not be checked: this version does not read the files in manuscript/.", "The manuscript, not the citation records, says what is cited now, so a guess could be wrong either way.", ["Nothing to fix in your files. Check this entry by hand."]),
   "bib.uncited:citation_unreadable": explain("Whether a listed source is cited could not be checked: at least one citation record cannot be read.", "The unreadable file may be the citation of this source.", ["Repair the unreadable citation record first (see the record.valid finding), then run `check` again."]),
   "bib.uncited:check_error": explain("The check itself failed while running, so this was not checked.", "This is a defect in Stemma, not a pass.", ["Report the defect together with the Stemma version."]),
-  "source.held:no_copy": explain("A cited source has no stored copy, so this citation is unchecked.", HELD_WHY, ["Add your copy (`source add <file> --source <id>`). For a book you hold only on paper, add a scan and attach its text. Writing can carry on meanwhile."], ["add_copy", "remove_citation"]),
-  "source.held:no_text": explain("A cited source has a stored copy but no extracted text, so this citation is unchecked.", HELD_WHY, ["Attach the text (`source text <capture id>`). A plain UTF-8 text copy is read as it is, and a PDF's own text layer is read page by page. For a scan with no text in it, supply recognized text with a form feed after each page (`--text-layer <file>`); Stemma recognizes no characters in page images."], ["add_text"]),
-  "source.held:record_unreadable": explain("Whether you hold this cited source could not be checked: at least one capture or extraction record cannot be read.", "The unreadable file may be the record of the stored copy or of its text.", ["Repair the unreadable record first (see the record.valid finding), then run `check` again."]),
-  "source.held:copy_missing": explain("A stored copy could not be checked: its file is not in the content store used here.", INTEGRITY_WHY, ["The content store is private and is not part of the repository. Point `--store-dir` at it, restore the file from your backup, or add the same file again. `store verify` lists every missing digest."], ["restore_copy"]),
-  "source.held:copy_altered": explain("A stored copy no longer matches its recorded digest, so it is not treated as the copy that was added.", INTEGRITY_WHY, ["Restore the file from your backup, or add the original file again. If the source itself changed, add it as a new copy."], ["restore_copy"]),
-  "source.held:text_missing": explain("The extracted text of a stored copy could not be checked: it is not in the content store used here.", INTEGRITY_WHY, ["Point `--store-dir` at the store that holds it, or restore it from your backup. `store verify` lists every missing digest."], ["restore_text"]),
-  "source.held:text_altered": explain("The stored text of a copy no longer matches its recorded digest, so it is not used.", INTEGRITY_WHY, ["Restore the text from your backup, or attach the text again as a new extraction."], ["restore_text"]),
-  "source.held:text_inconsistent": explain("An extraction record does not fit its stored text (its size or page spans disagree with it), so it is not used.", INTEGRITY_WHY, ["Retire this extraction and attach the text again as a new one. An extraction is never edited."], ["add_text"]),
-  "source.held:check_error": explain("The check itself failed while running, so this was not checked.", "This is a defect in Stemma, not a pass.", ["Report the defect together with the Stemma version."]),
-  "source.changed:depends_on_retired": explain("This rests on a copy, text or source that has since been replaced or retired.", CHANGED_WHY, ["Compare what you took from it with what replaced it, then correct or retire this item if it no longer holds. Stemma cannot yet record that you have looked, so the finding stays listed."]),
-  "source.changed:source_details_changed": explain("The source's details changed after a passage this rests on was anchored.", CHANGED_WHY, ["Check that the passage still belongs to the source as it is now recorded. Anchor it again as a new passage if it does."]),
-  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: a record it depends on cannot be read.", CHANGED_WHY, ["Repair the unreadable record first (see the record.valid finding), then run `check` again."]),
+  "source.held:no_source_file": explain("A cited source has no source file in the project, so this citation is unchecked.", HELD_WHY, ["Capture the source: `ingest`, or `source convert <original> --source <id>`. For a book held only on paper, supply a transcription made by a recognition tool or typed. Writing can carry on meanwhile."], ["capture_source", "remove_citation"]),
+  "source.held:no_text": explain("A cited source's files hold no text, so this citation is unchecked.", HELD_WHY, ["Capture a copy of the source whose text can be read, or supply a transcription."], ["capture_source"]),
+  "source.held:record_unreadable": explain("Whether this cited source's text is here could not be checked: a source file's manifest cannot be read.", HELD_WHY, ["Repair the unreadable file first (see the record.valid finding), then run `check` again."]),
+  "source.held:source_damaged": explain("A cited source has a source file that is damaged, so it is not used and this citation is unchecked.", HELD_WHY, ["See the source.pages and record.valid findings on that source file. Restore it from git, or record your own edit with `source seal`."], ["restore_source"]),
+  "source.held:check_error": CHECK_FAILED,
+  "source.pages:part_missing": explain("A page or section file that the manifest lists is missing.", STRUCTURE_WHY, ["Restore the file from git."], ["restore_source"]),
+  "source.pages:part_edited": explain("A page or section file differs from the digest its manifest records.", STRUCTURE_WHY, ["If you meant to edit it, record the edit with `source seal <text id> --actor person:<name>`. Otherwise restore it from git."], ["restore_source"]),
+  "source.pages:part_unlisted": explain("A page or section file is in the source directory but not in its manifest.", STRUCTURE_WHY, ["Remove the file, or convert the source again."], ["restore_source"]),
+  "source.pages:part_unreadable": explain("A page or section file cannot be read.", STRUCTURE_WHY, ["Restore the file from git."], ["restore_source"]),
+  "source.pages:part_index": explain("A page or section file's place does not agree with its name or its manifest.", STRUCTURE_WHY, ["Restore the files from git; their order is part of what is checked."], ["restore_source"]),
+  "source.pages:part_sequence": explain("The manifest does not list the pages or sections in sequence.", STRUCTURE_WHY, ["Restore the manifest from git."], ["restore_source"]),
+  "source.pages:page_count": explain("The pages of the source file do not match the number of pages in the original.", STRUCTURE_WHY, ["Restore the missing pages from git, or convert the original again. A source file that holds only some pages must say so."], ["restore_source"]),
+  "source.pages:part_invalid": explain("A source file's manifest or a part breaks the source file format, so its completeness could not be checked.", STRUCTURE_WHY, ["See the record.valid finding and correct it."], ["restore_source"]),
+  "source.pages:check_error": CHECK_FAILED,
+  "source.labels:label_repeated": explain("Two pages in sequence carry the same printed label.", LABEL_WHY, ["Look at the page images. Correct the page map (`source label`), or leave a page without a label if its number is not established."], ["relabel"]),
+  "source.labels:label_backwards": explain("Printed page labels go backwards.", LABEL_WHY, ["Look at the page images. A second numbering bound into one file can do this: label only the pages of the work you cite."], ["relabel"]),
+  "source.labels:label_jump": explain("Printed page numbers advance by more than the pages do, as when pages are missing from the original or a label is wrong.", LABEL_WHY, ["Look at the page images. If leaves are missing from your copy, the finding records that; otherwise correct the page map (`source label`)."], ["relabel"]),
+  "source.labels:folio_differs": explain("A page number printed on a page differs from the label recorded for that page.", LABEL_WHY, ["Look at the page image and correct whichever is wrong."], ["relabel"]),
+  "source.labels:check_error": CHECK_FAILED,
+  "source.footnotes:marker_without_note": explain("A note marker in the text has no note on its page or section.", NOTE_WHY, ["Compare the page with the original. The note may continue from or onto another page, or the conversion may have lost it."]),
+  "source.footnotes:note_without_marker": explain("A note has no marker in the text of its page or section.", NOTE_WHY, ["Compare the page with the original. If the note continues from an earlier page, mark its block continued."]),
+  "source.footnotes:check_error": CHECK_FAILED,
+  "source.original:original_not_upstream": explain("A source file was converted from an original that none of the source's upstream records names.", ORIGINAL_WHY, ["Check which original is right. Record its upstream (`ingest --plan`), or retire this source file."]),
+  "source.original:conversion_differs": explain("A fresh conversion of the original does not give the committed text, after a person's corrections are undone.", ORIGINAL_WHY, ["Look at the differing readings. If a person edited the words, mark the change as a correction; otherwise restore the file, or convert the original again and retire this one."]),
+  "source.original:comparison_stale": explain("The text or the tools changed after the last fresh conversion was compared, so it no longer says anything.", ORIGINAL_WHY, ["Run `source verify <text id> --original <file>`, or `ingest` with the originals."], ["verify_original"]),
+  "source.original:check_error": CHECK_FAILED,
+  "source.changed:depends_on_retired": explain("This rests on a source file or source that has since been replaced or retired.", CHANGED_WHY, ["Compare what you took from it with what replaced it, then correct or retire this item if it no longer holds. Stemma cannot yet record that you have looked, so the finding stays listed."]),
+  "source.changed:text_changed": explain("The text of a page or section changed after a passage this rests on was captured from it.", CHANGED_WHY, ["Look at the page, capture the passage again, and retire the old passage and anything copied from it that no longer holds."]),
+  "source.changed:source_details_changed": explain("The source's details changed after a passage this rests on was captured.", CHANGED_WHY, ["Check that the passage still belongs to the source as it is now recorded, and capture it again if it does."]),
+  "source.changed:record_unreadable": explain("Whether what this rests on has changed could not be checked: something it depends on cannot be read.", CHANGED_WHY, ["Repair the unreadable file first (see the record.valid and source.pages findings), then run `check` again."]),
   "source.changed:check_error": CHECK_FAILED,
-  "quote.present:near_match": explain("A quotation is not in your stored copy's text as written. A passage close to it is; both are shown.", QUOTE_WHY, ["Compare the two texts, and look at the page itself, since extracted or recognized text can be wrong. If your quotation is wrong, correct it to match the page. An omission, an added word, a change of capitals or punctuation, an ellipsis or a bracketed edit all count as differences."], ["correct_quotation"]),
-  "quote.present:absent": explain("A quotation was not found in your stored copy's text.", QUOTE_WHY, ["Find the words on the page and correct the quotation, or remove the quotation marks if these are your words or a paraphrase. If the page does hold these words, the stored text is wrong there, or it is a different edition: attach a better text or add the copy you quoted. Words that run across a page break can also be missed, because running heads come between them."], ["correct_quotation", "add_copy"]),
-  "quote.present:text_unavailable": explain("A quotation could not be compared: the stored text of its source cannot be used here.", UNCOMPARED_WHY, ["See the source.held finding. Add a copy and attach its text, point `--store-dir` at the store that holds it, or restore it from your backup."], ["add_copy", "add_text"]),
-  "quote.present:poor_quality": explain("A quotation was not found, but the only stored text is marked poor, so this does not show that the source lacks it.", UNCOMPARED_WHY, ["Look at the page itself, or attach a better text."], ["add_text"]),
-  "quote.present:anchor_not_found": explain("A note extract could not be compared: none of the passages it is anchored to can be found in stored text.", UNCOMPARED_WHY, ["See the findings on its passages, and anchor the note to a passage that is in the stored text."]),
+  "quote.present:near_match": explain("A quotation is not in the source's text as written. A passage close to it is; both are shown.", QUOTE_WHY, ["Compare the two texts, and look at the page itself, since converted or recognized text can be wrong. If your quotation is wrong, capture the passage by its address so the words are copied. An omission, an added word, a change of capitals or punctuation, an ellipsis or a bracketed edit all count as differences."], ["capture_passage"]),
+  "quote.present:absent": explain("A quotation was not found in the source's text.", QUOTE_WHY, ["Find the words (`passage find`) and capture them, or remove the quotation marks if these are your words or a paraphrase. If the page does hold these words, the source text is wrong there, or it is a different edition: record that, or capture the copy you quoted."], ["capture_passage", "capture_source"]),
+  "quote.present:passage_differs": explain("A passage record no longer matches the words at its address.", QUOTE_WHY, ["Do not edit the record's words. Capture the passage again from the source text and retire this one."], ["capture_passage"]),
+  "quote.present:citation_differs": explain("A citation made from a passage no longer says what the passage says: its quotation or locator was changed.", QUOTE_WHY, ["Add the citation again from the passage, so that both are copied, and retire this one."], ["capture_passage"]),
+  "quote.present:text_unavailable": explain("A quotation could not be compared: the text of its source cannot be used here.", UNCOMPARED_WHY, ["See the source.held and source.pages findings, then capture or repair the source's text."], ["capture_source"]),
+  "quote.present:poor_quality": explain("A quotation was not found, but the only text is marked poor, so this does not show that the source lacks it.", UNCOMPARED_WHY, ["Look at the page itself, or capture a better text."], ["capture_source"]),
+  "quote.present:anchor_not_found": explain("A note extract could not be compared: none of the passages it is anchored to can be found in the source text.", UNCOMPARED_WHY, ["See the findings on its passages, and anchor the note to a passage that is in the text."]),
   "quote.present:check_error": CHECK_FAILED,
+  "quote.page:wrong_page": explain("The quoted words are in the source, but not where the citation says.", PAGE_WHY, ["Look at the place found, and correct the citation's locator, ideally by citing a captured passage so that the locator is copied."], ["repoint", "capture_passage"]),
+  "quote.page:partly_on_page": explain("The quotation runs beyond what the citation names, for example over a page break.", PAGE_WHY, ["Cite every page the words lie on, as a captured passage does."], ["repoint", "capture_passage"]),
+  "quote.page:place_unknown": explain("Where the quoted words lie could not be compared with the locator: that part of the text has no such page label, chapter or paragraph.", PAGE_WHY, ["Establish the page labels (`source pages`, `source label`) from what shows them, or cite a locator the source's text has."], ["relabel"]),
+  "quote.page:check_error": CHECK_FAILED,
   "locator.extent:outside_extent": explain("A citation's locator is outside the extent recorded for the work.", LOCATOR_WHY, ["Check the locator against the work and correct it. If the recorded extent is wrong, correct the source record."], ["repoint"]),
-  "locator.extent:outside_page_map": explain("A cited page is outside the printed pages mapped in your stored copy.", LOCATOR_WHY, ["Check the page number against the source and correct it. If the page is right, your copy is partial or its page map leaves that page without a label: look at the page map (`source pages` proposes one)."], ["repoint", "add_copy"]),
-  "locator.extent:page_not_mapped": explain("A cited page falls between mapped pages, on a page the page map gives no label, so it could not be checked.", UNLOCATED_WHY, ["Look at the page in your copy. If its number can be established, attach the text again with a page map that includes it and says what shows the label."], ["add_text"]),
-  "locator.extent:no_extent": explain("A locator could not be checked: no extent is recorded for it, and no page map covers its numbering.", UNLOCATED_WHY, ["For pages, attach your copy's text with a page map (`source pages` proposes one from the printed numbers). For another kind of locator, record the work's extent on the source, taken from the work itself."], ["add_text"]),
+  "locator.extent:outside_page_map": explain("A cited page, chapter or paragraph is outside those in your source files.", LOCATOR_WHY, ["Check the number against the source and correct it. If it is right, your source file holds only part of the work or leaves that page without a label."], ["repoint", "capture_source"]),
+  "locator.extent:page_not_mapped": explain("A cited page falls between labelled pages, on a page with no established label, so it could not be checked.", UNLOCATED_WHY, ["Look at the page. If its number can be established, add it to the page map and run `source label`."], ["relabel"]),
+  "locator.extent:no_extent": explain("A locator could not be checked: no extent is recorded for it, and no source file has its numbering.", UNLOCATED_WHY, ["For pages, label your source file's pages; a source with no pages cannot check a page number. For another kind of locator, record the work's extent on the source, taken from the work itself."], ["relabel"]),
   "locator.extent:unparsable_locator": explain("A locator is not written in a form that can be compared with the work's pages or extent.", UNLOCATED_WHY, ["Write it as the printed label, or as a range with both ends in full, such as 41-43. Otherwise check it by hand."]),
-  "locator.extent:record_unreadable": explain("A locator could not be checked: at least one capture or extraction record cannot be read.", UNLOCATED_WHY, ["Repair the unreadable record first (see the record.valid finding), then run `check` again."]),
+  "locator.extent:record_unreadable": explain("A locator could not be checked: a source file of this source cannot be read or is damaged.", UNLOCATED_WHY, ["See the record.valid and source.pages findings, repair the source file, then run `check` again."]),
   "locator.extent:check_error": CHECK_FAILED,
+  "meta.source:mismatch": explain("The source record disagrees with what the captured copy states about itself.", META_WHY, ["Compare both values with the title page of the work. Correct the record if it is wrong; if the copy is a different edition or a misdescribed file, capture the right one."], ["correct_record", "capture_source"]),
+  "meta.source:source_damaged": explain("The source's details could not be compared with a copy: its source file is damaged.", META_WHY, ["See the source.pages finding and repair the source file."], ["restore_source"]),
+  "meta.source:not_found_in_copy": explain("Some of the source's details were not found in what the copy states or in the text of its title page. The text there may be recognized text with errors.", META_WHY, ["Look at the title page itself. If the record is right, a person can confirm it: `review add <text id> --scope source_details --fields <fields> --against <what you looked at> --outcome agrees --actor person:<name>`. If the title page is elsewhere, name it in the source file's identity."], ["confirm_details", "correct_record"]),
+  "meta.source:nothing_to_compare": explain("The source record has no title, so its details could not be compared with the copy.", META_WHY, ["Record the title from the work itself."], ["correct_record"]),
+  "meta.source:check_error": CHECK_FAILED,
+  "meta.resolver:mismatch": explain("The source record disagrees with a saved catalogue lookup.", META_WHY, ["Compare both with the work itself. Correct the record if it is wrong. A catalogue can be wrong or describe another edition: if so, keep the record and the finding shows the difference."], ["correct_record"]),
+  "meta.resolver:no_lookup": explain("The source's details have not been compared with any catalogue: no lookup is saved.", META_WHY, ["Give the source's upstream record an identifier to look up, or run `resolve <source id> --via crossref|internet_archive --identifier <value>`. Some works are in neither catalogue."], ["resolve"]),
+  "meta.resolver:lookup_silent": explain("A saved lookup states no title, so nothing could be compared with it.", META_WHY, ["Look the work up by another identifier, or have a person confirm the details."], ["resolve", "confirm_details"]),
+  "meta.resolver:check_error": CHECK_FAILED,
+  "id.resolves:no_lookup": explain("An identifier on the source record has not been looked up.", ID_WHY, ["Run `resolve` for it. This version looks up DOIs at Crossref and Internet Archive items; other identifiers cannot yet be checked."], ["resolve"]),
+  "id.resolves:not_found": explain("A catalogue did not find the work this identifier should name.", ID_WHY, ["Check the identifier against the work and correct or remove it."], ["correct_record"]),
+  "id.resolves:other_work": explain("An identifier resolves to a work with a different title.", ID_WHY, ["Check which is wrong: the identifier or the record's title."], ["correct_record"]),
+  "id.resolves:lookup_silent": explain("The saved lookup states no title, or the record has none, so the identifier could not be compared.", ID_WHY, ["Check the identifier by hand."]),
+  "id.resolves:lookup_error": explain("The saved lookup is a response that could not be read.", ID_WHY, ["Run `resolve` again."], ["resolve"]),
+  "id.resolves:check_error": CHECK_FAILED,
+  "number.present:figure_absent": explain("A figure in a sentence that cites this source was not found in the source's text.", NUMBER_WHY, ["Find the figure in the source and correct the sentence, or move the figure to a sentence that does not attribute it to this source. A converted or recognized text can also be wrong: look at the page."]),
+  "number.present:several_citations": explain("A sentence with a figure cites more than one source, so which one holds the figure could not be judged.", NUMBER_WHY, ["Check the figure by hand, or split the citation."]),
+  "number.present:text_unavailable": explain("A figure could not be compared: the source has no usable text.", NUMBER_WHY, ["Capture or repair the source's text."], ["capture_source"]),
+  "number.present:check_error": CHECK_FAILED,
   "coordinate.stray:coordinate_text": explain("Text in a project file looks like a map coordinate. The value is not repeated here.", COORDINATE_WHY, ["Look at the position in the evidence. If it is a sensitive site, remove the value from the file (git history may still hold it). If it is public or not a coordinate, you need do nothing."]),
   "coordinate.stray:file_unreadable": explain("A project file could not be read, so it was not scanned for coordinates.", COORDINATE_WHY, ["Make the file a readable UTF-8 file inside the project, then run `check` again."]),
   "coordinate.stray:check_error": explain("The check itself failed while running, so this was not checked.", "This is a defect in Stemma, not a pass.", ["Report the defect together with the Stemma version."])
@@ -106894,18 +107748,28 @@ var PROBLEMS = {
   sentence_not_normalized: "the sentence text has extra or unusual white space",
   unknown_field: "the field is not part of the record format",
   wrong_location: "the file name or directory does not match the record",
-  stray_file: "the file is not a .json record",
+  stray_file: "the file is not a .json record, a source manifest, or one of its page or section files",
   reference_missing: "no record has this ID",
   reference_wrong_kind: "the record with this ID is of a kind that is not allowed here",
   null_value: "null is not allowed; leave the field out",
   number_not_integer: "numbers must be whole and within the safe range; write others as strings",
   bad_size: "a size cannot be below zero",
-  bad_page_range: "a page-map segment has an impossible or overlapping range of file pages",
+  bad_page_range: "a page-map segment has an impossible or overlapping range of pages",
   bad_page_labels: "a page-map segment's labels do not fit its numbering style or its number of pages",
   label_evidence_missing: "a page-map segment gives printed labels without saying what evidence they come from",
-  bad_page_spans: "page spans must be in page order, must not overlap, and must not end before they start",
-  missing_page_spans: "an extraction of a PDF must say where each page's text starts and ends",
-  capture_digest_mismatch: "the extraction names other bytes than the copy its capture holds"
+  bad_original: "a digital original is tied by digest and size, and a physical one by a description and where it is held",
+  bad_page_label: "a page's label, its status, and how it was determined do not agree",
+  bad_part: "the part is not in the source file format",
+  model_verification: "a model's review can only flag; it is never a person's verification",
+  response_digest_mismatch: "the saved response does not match its digest",
+  bad_address: "a passage address needs, for each part, a start before its end",
+  front_matter_missing: "the file does not begin with a front matter block",
+  front_matter_unreadable: "the front matter is not one readable JSON object",
+  text_outside_block: "there is text before the first block line",
+  unknown_annotation: "an annotation is not one the source file format defines, or is not closed",
+  unknown_role: "a block's role is not one the source file format defines",
+  raw_angle: "a < in source text must be written as an entity, so that source text cannot form an annotation",
+  correction_not_by_person: "a correction names a person; source text is not corrected by a model or script"
 };
 var problemTemplate = (problem) => `record.valid:${problem.reason}`;
 function result(parts) {
@@ -106934,468 +107798,6 @@ function result(parts) {
 }
 function sortResults(results) {
   return results.sort((a, b) => compareCodePoints(a.check, b.check) || compareCodePoints(a.subject, b.subject) || compareCodePoints(a.finding_key, b.finding_key));
-}
-
-// packages/core/src/checks/records.ts
-function subjectOf(file) {
-  const id = idOf(file);
-  const owns = id !== undefined && isRecordId(String(file.data.kind), id) && file.path.endsWith(`/${id}.json`);
-  return owns ? id : file.path;
-}
-function itemOf(file) {
-  const { review: _r, created: _c, changed: _m, legacy: _l, x: _x, ...content } = file.data;
-  return { record: idOf(file), content_sha256: digest(content) };
-}
-var location = (name, value) => ({ name, class: "location", value });
-function fileResults(file) {
-  const check = "record.valid";
-  const subject = subjectOf(file);
-  const evidence = [location("file", file.path)];
-  const finding = (outcome, reason, locus, extra = []) => result({ check, outcome, reason, subject, locus: `${file.path}#${locus}`, evidence: [...evidence, ...extra] });
-  if (file.state === "unreadable") {
-    return [finding("unverifiable", "record_unreadable", "file", [{ name: "problem", class: "metadata", value: file.unreadable }])];
-  }
-  if (file.state === "version_unsupported")
-    return [finding("unverifiable", "version_unsupported", "file")];
-  const results = file.problems.map((problem) => {
-    const extra = [
-      ...problem.field ? [location("field", problem.field)] : [],
-      { name: "problem", class: "metadata", value: PROBLEMS[problem.code] },
-      ...problem.target ? [location(problem.code === "wrong_location" ? "expected_path" : "points_at", problem.target)] : []
-    ];
-    return finding("fail", problemTemplate(problem).split(":")[1], `${problem.code}${problem.field}`, extra);
-  });
-  if (file.state === "ok" && !file.canonical && file.formattable)
-    results.push(finding("fail", "record_noncanonical", "form"));
-  return results.length > 0 ? results : [result({ check, outcome: "pass", subject, locus: file.path, evidence })];
-}
-function rulesResults(corpus) {
-  const file = corpus.rules;
-  if (!file)
-    return [];
-  const check = "record.valid";
-  const path = file.path;
-  if (!file.bytes) {
-    return [result({ check, outcome: "unverifiable", reason: "record_unreadable", subject: path, locus: path, evidence: [location("file", path)] })];
-  }
-  const problems = checkRuleHeadings(new TextDecoder().decode(file.bytes));
-  if (problems.length === 0)
-    return [result({ check, outcome: "pass", subject: path, locus: path, evidence: [location("file", path)] })];
-  return problems.map((p, i) => result({
-    check,
-    outcome: "fail",
-    reason: p.code,
-    subject: path,
-    locus: `${path}#${p.code}#${p.rule ?? i}`,
-    evidence: [location("file", path), location("line", String(p.line))]
-  }));
-}
-
-// packages/core/src/checks/changed.ts
-var sourceBinding = (source) => digest(Object.fromEntries(SOURCE_BINDING_FIELDS.flatMap((f) => source[f] === undefined ? [] : [[f, source[f]]])));
-var list = (value) => value === undefined ? [] : [value].flat().map(String);
-function walker(corpus) {
-  const links = active(corpus, "attestation");
-  const unreadable = new Set(corpus.records.filter((f) => f.state !== "ok").map((f) => f.path.replace(/^.*\//, "").replace(/\.json$/, "")));
-  return function follow(id, walk, through, seen) {
-    if (seen.has(id))
-      return;
-    seen.add(id);
-    const file = corpus.byId.get(id);
-    if (!file) {
-      if (unreadable.has(id))
-        walk.unread = true;
-      return;
-    }
-    const data = file.data;
-    const kind = String(data.kind);
-    if (["capture", "extraction", "source"].includes(kind)) {
-      walk.reached++;
-      if (isRetired(data))
-        walk.changes.push({ reason: "depends_on_retired", record: file, what: `retired ${kind}`, through });
-    }
-    const next = (ids) => ids.forEach((to) => follow(to, walk, through.length === 0 || through.at(-1) !== id ? [...through, id] : through, seen));
-    if (kind === "extraction")
-      next(list(data.capture));
-    if (kind === "capture")
-      next(list(data.source));
-    if (kind === "passage") {
-      next([...list(data.extraction), ...list(data.capture), ...list(data.source)]);
-      const source = corpus.byId.get(String(data.source));
-      if (source?.data?.kind === "source" && typeof data.source_record_sha256 === "string" && data.source_record_sha256 !== sourceBinding(source.data)) {
-        walk.changes.push({ reason: "source_details_changed", record: source, what: `source details changed since passage ${id} was anchored`, through: [...through, id] });
-      }
-    }
-    if (kind === "note")
-      next([...list(data.passages), ...list(data.source)]);
-    if (kind === "claim")
-      next(links.filter((l) => l.data.claim === id).map((l) => String(l.data.evidence)));
-  };
-}
-function dependants(corpus) {
-  const follow = walker(corpus);
-  const out = [];
-  for (const kind of ["note", "claim"]) {
-    for (const file of active(corpus, kind)) {
-      const walk = { changes: [], reached: 0, unread: false };
-      follow(idOf(file), walk, [], new Set);
-      if (walk.reached > 0 || walk.unread)
-        out.push({ file, walk });
-    }
-  }
-  if (hasManuscript(corpus))
-    return out;
-  for (const { citation, key, matches } of resolveCitations(corpus)) {
-    const walk = { changes: [], reached: 0, unread: false };
-    const seen = new Set;
-    let sources = matches;
-    if (sources.length === 0) {
-      sources = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source" && isRetired(f.data) && (key !== undefined ? citationKeys(f.data).includes(key) : idOf(f) === citation.data.source));
-    }
-    for (const claim of list(citation.data.claims))
-      follow(claim, walk, [], seen);
-    const source = sources.length === 1 ? idOf(sources[0]) : undefined;
-    if (source) {
-      follow(source, walk, [], seen);
-      const since = String(isObject(citation.data.created) ? citation.data.created.at : "");
-      const captures = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "capture" && f.data.source === source);
-      const texts = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "extraction" && captures.some((c) => idOf(c) === f.data.capture));
-      for (const record of [...captures, ...texts]) {
-        walk.reached++;
-        const retired = record.data.retired;
-        if (!isObject(retired) || !isObject(retired.stamp) || Date.parse(String(retired.stamp.at)) < Date.parse(since))
-          continue;
-        if (!walk.changes.some((c) => c.record === record)) {
-          walk.changes.push({ reason: "depends_on_retired", record, what: `retired ${String(record.data.kind)}`, through: [source] });
-        }
-      }
-    }
-    if (walk.reached > 0 || walk.unread)
-      out.push({ file: citation, walk, ...source ? { source } : {} });
-  }
-  return out;
-}
-function changedResults(corpus) {
-  const check = "source.changed";
-  return dependants(corpus).map(({ file, walk, source }) => {
-    const data = file.data;
-    const evidence = [{ name: `${String(data.kind)}_file`, class: "location", value: file.path }];
-    for (const change of walk.changes) {
-      const retired = change.record.data.retired;
-      evidence.push({ name: "changed_record", class: "location", value: change.record.path });
-      evidence.push({
-        name: "change",
-        class: "metadata",
-        value: change.reason === "depends_on_retired" && isObject(retired) && isObject(retired.stamp) ? `${change.what} on ${String(retired.stamp.at)}: ${String(retired.reason)}${typeof retired.replaced_by === "string" ? ` (replaced by ${retired.replaced_by})` : ""}` : change.what
-      });
-      const path = change.through.filter((id) => id !== idOf(file));
-      if (path.length > 0)
-        evidence.push({ name: "reached_through", class: "location", value: path.join(", ") });
-    }
-    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
-    const reason = walk.changes.some((c) => c.reason === "depends_on_retired") ? "depends_on_retired" : walk.changes.length > 0 ? "source_details_changed" : walk.unread ? "record_unreadable" : undefined;
-    return result({
-      check,
-      outcome: walk.changes.length > 0 ? "fail" : walk.unread ? "unverifiable" : "pass",
-      ...reason ? { reason } : {},
-      subject: subjectOf(file),
-      locus: idOf(file) ?? file.path,
-      evidence,
-      item: itemOf(file),
-      ...source ? { source } : {},
-      ...sentence ? { sentence } : {}
-    });
-  });
-}
-
-// packages/core/src/checks/bibliography.ts
-var hasManuscript = (corpus) => corpus.manuscript.some((f) => f.path.endsWith(".md"));
-function active(corpus, kind) {
-  return corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
-}
-var unreadableIn = (corpus, directory) => corpus.records.some((f) => (f.state === "unreadable" || f.state === "version_unsupported") && f.path.startsWith(`records/${directory}/`));
-function resolveCitations(corpus) {
-  const sources = active(corpus, "source");
-  return active(corpus, "citation").map((citation) => {
-    const { key, source } = citation.data;
-    if (typeof key === "string") {
-      return { citation, key, matches: sources.filter((s) => citationKeys(s.data).includes(key)) };
-    }
-    return { citation, matches: sources.filter((s) => idOf(s) === source) };
-  });
-}
-function listedSources(corpus) {
-  const list = corpus.settings.data?.bibliography_include;
-  if (!Array.isArray(list))
-    return [];
-  return [...new Set(list)].flatMap((id) => {
-    const file = typeof id === "string" ? corpus.byId.get(id) : undefined;
-    return file?.data?.kind === "source" ? [file] : [];
-  });
-}
-function citeKeyResults(corpus) {
-  if (hasManuscript(corpus))
-    return [];
-  const allSources = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source");
-  return resolveCitations(corpus).map(({ citation, key, matches }) => {
-    const data = citation.data;
-    const subject = subjectOf(citation);
-    const evidence = [{ name: "citation_file", class: "location", value: citation.path }];
-    if (key !== undefined)
-      evidence.push({ name: "key", class: "manuscript", value: key });
-    for (const [name, field] of [["chapter", "chapter"], ["document_position", "document_position"]]) {
-      if (typeof data[field] === "string")
-        evidence.push({ name, class: "location", value: data[field] });
-    }
-    if (isObject(data.locator)) {
-      evidence.push({ name: "locator", class: "manuscript", value: `${String(data.locator.label)} ${String(data.locator.value)}` });
-    }
-    const only = matches.length === 1 ? idOf(matches[0]) : undefined;
-    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
-    if (sentence)
-      evidence.push({ name: "sentence", class: "manuscript", value: sentence.text });
-    const common = {
-      check: "cite.key",
-      subject,
-      locus: idOf(citation) ?? citation.path,
-      evidence,
-      item: itemOf(citation),
-      ...sentence ? { sentence } : {},
-      ...only ? { source: only } : {}
-    };
-    if (only)
-      return result({ ...common, outcome: "pass" });
-    if (matches.length > 1) {
-      for (const match of matches)
-        evidence.push({ name: "held_by", class: "location", value: match.path });
-      return result({ ...common, outcome: "fail", reason: "key_ambiguous" });
-    }
-    if (key === undefined && data.source === undefined)
-      return result({ ...common, outcome: "fail", reason: "key_missing" });
-    if (unreadableIn(corpus, "sources"))
-      return result({ ...common, outcome: "unverifiable", reason: "source_unreadable" });
-    if (key !== undefined) {
-      for (const source of allSources) {
-        for (const held of citationKeys(source.data)) {
-          if (held === key)
-            evidence.push({ name: "held_by_retired_source", class: "location", value: source.path });
-          else if (held.toLowerCase() === key.toLowerCase()) {
-            evidence.push({ name: "similar_key_differs_in_letter_case", class: "metadata", value: held });
-          }
-        }
-      }
-    }
-    return result({ ...common, outcome: "fail", reason: "key_unknown" });
-  });
-}
-function uncitedResults(corpus) {
-  const cited = new Set(resolveCitations(corpus).flatMap((r) => r.matches.length === 1 ? [idOf(r.matches[0])] : []));
-  return listedSources(corpus).map((source) => {
-    const id = idOf(source);
-    const key = source.data.citation_key;
-    const evidence = [{ name: "source_file", class: "location", value: source.path }];
-    if (typeof key === "string")
-      evidence.push({ name: "key", class: "metadata", value: key });
-    const binding = sourceBinding(source.data);
-    const common = {
-      check: "bib.uncited",
-      subject: subjectOf(source),
-      source: id,
-      locus: "bibliography_include",
-      evidence,
-      item: { record: id, content_sha256: binding }
-    };
-    const cannot = hasManuscript(corpus) ? "manuscript_not_read" : cited.has(id) ? undefined : unreadableIn(corpus, "citations") ? "citation_unreadable" : active(corpus, "citation").length === 0 ? "no_manuscript" : undefined;
-    if (cannot)
-      return result({ ...common, outcome: "unverifiable", reason: cannot });
-    return cited.has(id) ? result({ ...common, outcome: "pass" }) : result({ ...common, outcome: "fail", reason: "not_cited" });
-  });
-}
-
-// packages/core/src/checks/locators.ts
-function numberOf(label) {
-  if (/^[1-9]\d{0,6}$/.test(label))
-    return { style: "arabic", value: Number(label) };
-  const lower = fromRoman(label.toLowerCase());
-  if (lower === undefined)
-    return;
-  if (label === label.toLowerCase())
-    return { style: "roman_lower", value: lower };
-  return label === label.toUpperCase() ? { style: "roman_upper", value: lower } : undefined;
-}
-var writeAs = (style, value) => style === "arabic" ? String(value) : style === "roman_lower" ? toRoman(value) : toRoman(value).toUpperCase();
-function locatorParts(value, end, known = new Set) {
-  const whole = value.trim();
-  if (typeof end === "string")
-    return [{ first: whole, last: end.trim() }];
-  if (known.has(whole))
-    return [{ first: whole, last: whole }];
-  return whole.split(/\s*,\s*/).map((piece) => {
-    const ends = piece.split(/\s*(?:-{1,2}|\u2013|\u2014)\s*/);
-    return ends.length === 2 && !known.has(piece) ? { first: ends[0], last: ends[1] } : { first: piece, last: piece };
-  });
-}
-var PAGE_TERMS = new Set(["page", "folio"]);
-function citedPages(locator) {
-  if (!isObject(locator) || !PAGE_TERMS.has(String(locator.label)) || typeof locator.value !== "string")
-    return;
-  const labels = [];
-  for (const part of locatorParts(locator.value, locator.end)) {
-    const [first, last] = [numberOf(part.first), numberOf(part.last)];
-    if (part.first === part.last)
-      labels.push(part.first);
-    else if (first && last && first.style === last.style && last.value >= first.value && last.value - first.value < 100) {
-      for (let v = first.value;v <= last.value; v++)
-        labels.push(writeAs(first.style, v));
-    } else
-      return;
-  }
-  return labels;
-}
-function mappedPages(corpus, source) {
-  const captures = new Set(active(corpus, "capture").filter((c) => c.data.source === source).map(idOf));
-  const out = { labels: new Set, from: [], unmapped: 0 };
-  for (const extraction of active(corpus, "extraction")) {
-    if (!captures.has(String(extraction.data.capture)))
-      continue;
-    const pages = extraction.data.pages;
-    const labels = pageLabels(Array.isArray(pages) ? pages : []);
-    if (labels.size === 0)
-      continue;
-    for (const label of labels.values())
-      out.labels.add(label);
-    const spans = extraction.data.page_spans;
-    out.unmapped = Math.max(out.unmapped, (Array.isArray(spans) ? spans.length : 0) - labels.size);
-    out.from.push(extraction);
-  }
-  return out;
-}
-function describeLabels(labels) {
-  const numbered = new Map;
-  const other = [];
-  for (const label of labels) {
-    const n = numberOf(label);
-    if (n)
-      numbered.set(n.style, [...numbered.get(n.style) ?? [], n.value]);
-    else
-      other.push(label);
-  }
-  const out = [];
-  for (const style of ["roman_lower", "roman_upper", "arabic"]) {
-    const values = [...new Set(numbered.get(style) ?? [])].sort((a, b) => a - b);
-    for (let i = 0, j = 0;i < values.length; i = j + 1) {
-      for (j = i;values[j + 1] === values[j] + 1; j++)
-        ;
-      out.push(i === j ? writeAs(style, values[i]) : `${writeAs(style, values[i])}-${writeAs(style, values[j])}`);
-    }
-  }
-  if (other.length > 0)
-    out.push(other.length > 12 ? `${other.slice(0, 12).join(", ")} and ${other.length - 12} more` : other.join(", "));
-  return out.join(", ");
-}
-function against(part, ranges) {
-  const [first, last] = [numberOf(part.first), numberOf(part.last)];
-  if (!first || !last || first.style !== last.style || last.value < first.value)
-    return "unparsable";
-  const same = ranges.filter((r) => r.style === first.style);
-  if (same.length === 0)
-    return "no_style";
-  if (same.some((r) => first.value >= r.first && last.value <= r.last))
-    return "inside";
-  const low = Math.min(...same.map((r) => r.first));
-  const high = Math.max(...same.map((r) => r.last));
-  return first.value >= low && last.value <= high ? "gap" : "outside";
-}
-function runs(labels) {
-  const values = [...labels].flatMap((l) => numberOf(l) ?? []).sort((a, b) => a.style.localeCompare(b.style) || a.value - b.value);
-  const out = [];
-  for (const { style, value } of values) {
-    const last = out.at(-1);
-    if (last && last.style === style && value <= last.last + 1)
-      last.last = Math.max(last.last, value);
-    else
-      out.push({ style, first: value, last: value });
-  }
-  return out;
-}
-var meta = (name, value) => ({ name, class: "metadata", value });
-var unverifiable = (reason, ...evidence) => ({ outcome: "unverifiable", reason, evidence });
-function overall(wheres, outside) {
-  if (wheres.includes("outside"))
-    return { outcome: "fail", reason: outside };
-  if (wheres.includes("unparsable"))
-    return { outcome: "unverifiable", reason: "unparsable_locator" };
-  if (wheres.includes("no_style"))
-    return { outcome: "unverifiable", reason: "no_extent" };
-  if (wheres.includes("gap"))
-    return { outcome: "unverifiable", reason: "page_not_mapped" };
-  return { outcome: "pass" };
-}
-function judgeLocator(corpus, source, locator) {
-  const term = String(locator.label);
-  const value = String(locator.value);
-  const recorded = (Array.isArray(source.extents) ? source.extents : []).filter(isObject).filter((e) => e.label === term);
-  if (recorded.length > 0) {
-    const shown = meta("extent", `${term} ${recorded.map((e) => `${String(e.first)}-${String(e.last)}`).join(", ")} (recorded on the source)`);
-    const ranges = recorded.flatMap((e) => {
-      const [first, last] = [numberOf(String(e.first)), numberOf(String(e.last))];
-      return first && last && first.style === last.style ? [{ style: first.style, first: first.value, last: last.value }] : [];
-    });
-    const wheres = locatorParts(value, locator.end).map((p) => {
-      if (recorded.some((e) => p.first === p.last && (p.first === e.first || p.first === e.last)))
-        return "inside";
-      const where = against(p, ranges);
-      return where === "gap" ? "outside" : where;
-    });
-    return { ...overall(wheres, "outside_extent"), evidence: [shown] };
-  }
-  if (corpus.records.some((f) => f.state !== "ok" && /^records\/(extractions|captures)\//.test(f.path)))
-    return unverifiable("record_unreadable");
-  const mapped = PAGE_TERMS.has(term) ? mappedPages(corpus, String(source.id)) : undefined;
-  if (!mapped || mapped.labels.size === 0)
-    return unverifiable("no_extent");
-  const evidence = [
-    meta("extent", `printed pages ${describeLabels(mapped.labels)} (mapped in your stored copy)`),
-    ...mapped.from.map((e) => ({ name: "extraction_file", class: "location", value: e.path })),
-    ...mapped.unmapped > 0 ? [meta("pages_without_a_label", `${mapped.unmapped} page(s) of the stored file`)] : []
-  ];
-  const ranges = runs(mapped.labels);
-  const wheres = locatorParts(value, locator.end, mapped.labels).map((part) => {
-    if (part.first === part.last && mapped.labels.has(part.first))
-      return "inside";
-    return against(part, ranges);
-  });
-  return { ...overall(wheres, "outside_page_map"), evidence };
-}
-var locatorCitations = (corpus) => hasManuscript(corpus) ? [] : resolveCitations(corpus).filter(({ citation }) => isObject(citation.data.locator));
-function locatorResults(corpus) {
-  return locatorCitations(corpus).flatMap(({ citation, key, matches }) => {
-    if (matches.length !== 1)
-      return [];
-    const data = citation.data;
-    const locator = data.locator;
-    const source = matches[0];
-    const verdict = judgeLocator(corpus, source.data, locator);
-    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
-    const shown = typeof locator.end === "string" ? `${String(locator.value)} to ${locator.end}` : String(locator.value);
-    return [result({
-      check: "locator.extent",
-      outcome: verdict.outcome,
-      ...verdict.reason ? { reason: verdict.reason } : {},
-      subject: subjectOf(citation),
-      locus: `${idOf(citation) ?? citation.path}#locator`,
-      source: idOf(source),
-      evidence: [
-        { name: "citation_file", class: "location", value: citation.path },
-        meta("key", key ?? String(source.data.citation_key ?? idOf(source))),
-        { name: "locator", class: "manuscript", value: `${String(locator.label)} ${shown}` },
-        { name: "source_file", class: "location", value: source.path },
-        ...verdict.evidence
-      ],
-      item: itemOf(citation),
-      ...sentence ? { sentence } : {}
-    })];
-  });
 }
 
 // packages/core/src/matching/quote-fold.ts
@@ -107646,430 +108048,151 @@ function editDistance(a, b) {
   }
   return row[b.length];
 }
-
-// packages/core/src/store.ts
-var NO_STORE = { verify: () => "missing", get: () => {
-  return;
-} };
-var isDigest = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-var BLOB_FIELDS = {
-  "*": ["value_blob_sha256", "text_blob_sha256", "entry_text_blob_sha256"],
-  capture: ["sha256"],
-  extraction: ["text_sha256"],
-  import_batch: ["original_sha256"],
-  image: ["blob_sha256"],
-  conversion: ["input_sha256", "output_sha256"]
-};
-function referencedBlobs(corpus) {
-  const found = new Map;
-  const add = (digest, path) => {
-    if (isDigest(digest))
-      found.set(digest, (found.get(digest) ?? new Set).add(path));
-  };
-  const walk = (value, path) => {
-    if (Array.isArray(value))
-      value.forEach((item) => walk(item, path));
-    else if (isObject(value)) {
-      for (const [name, item] of Object.entries(value)) {
-        if (name === "x")
-          continue;
-        if (BLOB_FIELDS["*"].includes(name))
-          add(item, path);
-        else
-          walk(item, path);
+function renderQuotation(exact) {
+  let out = "";
+  for (let i = 0;i < exact.length; ) {
+    const char = exact[i];
+    if (char === "-" || char === "\u2010" || char === SOFT_HYPHEN) {
+      const next = joinAfter(exact, i);
+      if (next !== undefined) {
+        i = next;
+        continue;
       }
     }
-  };
-  for (const file of corpus.records) {
-    if (file.state !== "ok" || !file.data)
+    if (char !== SOFT_HYPHEN)
+      out += char;
+    i++;
+  }
+  return out.replace(/\s+/g, " ").trim();
+}
+
+// packages/core/src/matching/texts.ts
+var codePoints = (text) => {
+  let n = 0;
+  for (const _ of text)
+    n++;
+  return n;
+};
+var unitAt = (text, points) => [...text].slice(0, points).join("").length;
+function paragraphsOf(part, main) {
+  const spans = [];
+  let at = 0;
+  for (const block of part.blocks) {
+    const text = blockText(block);
+    if (text === "" || ["footnote", "running-head", "folio", "boilerplate", "figure", "note"].includes(block.role))
       continue;
-    const kind = String(file.data.kind);
-    for (const name of Object.hasOwn(BLOB_FIELDS, kind) && kind !== "*" ? BLOB_FIELDS[kind] : [])
-      add(file.data[name], file.path);
-    walk(file.data, file.path);
+    const found = main.indexOf(text, at);
+    if (found < 0)
+      continue;
+    at = found + text.length;
+    if (PARAGRAPH_ROLES.includes(block.role))
+      spans.push({ start: found, end: at });
   }
-  return new Map([...found].sort(([a], [b]) => compareCodePoints(a, b)).map(([d, paths]) => [d, [...paths].sort(compareCodePoints)]));
+  return spans;
 }
-var unreadRecords = (corpus) => corpus.records.filter((f) => f.state !== "ok").map((f) => f.path);
-function verifyStore(corpus, store, stored) {
-  const referenced = referencedBlobs(corpus);
-  const problems = [];
-  for (const [sha256, named_by] of referenced) {
-    const state = store.verify(sha256);
-    if (state !== "ok")
-      problems.push({ sha256, state, named_by });
-  }
-  return {
-    referenced: referenced.size,
-    intact: referenced.size - problems.length,
-    problems,
-    unread_records: unreadRecords(corpus),
-    ...stored ? { unreferenced: stored.filter((d) => !referenced.has(d)).sort(compareCodePoints) } : {}
-  };
-}
-
-// packages/core/src/matching/stored.ts
-function open(extraction, capture, bytes) {
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return;
-  }
-  const { text_size, page_spans, pages, quality } = extraction.data;
-  const astral = [];
-  for (let i = 0, points = 0;i < text.length; i++, points++) {
-    if (text.codePointAt(i) > 65535) {
-      astral.push(points);
-      i++;
-    }
-  }
-  const length = text.length - astral.length;
-  if (text_size !== bytes.length || page_spans !== undefined && (!Array.isArray(page_spans) || checkPageSpans(page_spans, length).length > 0)) {
-    return;
-  }
-  const below = (test) => {
-    let low = 0;
-    let high = astral.length;
-    while (low < high) {
-      const middle = low + high >> 1;
-      if (test(middle))
-        low = middle + 1;
-      else
-        high = middle;
-    }
-    return low;
-  };
-  const unit = (points) => points + below((i) => astral[i] < points);
-  const spans = page_spans ?? [];
-  const ranges = spans.map((s) => ({ page: s.page_index, start: unit(s.start), end: unit(s.end) }));
-  let folded;
-  const about = isObject(quality) ? quality : {};
-  return {
-    extraction,
-    capture,
-    text,
-    spans,
-    labels: pageLabels(Array.isArray(pages) ? pages : []),
-    method: String(about.method),
-    level: String(about.level),
-    folded: () => folded ??= fold(text, "stored"),
-    unit,
-    pagesOf: (start, end) => ranges.filter((r) => r.start < end && r.end > start).map((r) => r.page)
-  };
-}
-
-class StoredTexts {
-  corpus;
-  blobs;
-  read;
-  known = new Map;
-  constructor(corpus, blobs, read = new Set) {
-    this.corpus = corpus;
-    this.blobs = blobs;
-    this.read = read;
-  }
-  of(extraction) {
-    const id = idOf(extraction) ?? extraction.path;
-    const found = this.known.get(id) ?? this.load(extraction);
-    this.known.set(id, found);
-    return found;
-  }
-  load(extraction) {
-    const capture = this.corpus.byId.get(String(extraction.data.capture));
-    const sha = capture?.data?.sha256;
-    if (capture?.data?.kind !== "capture" || !isDigest(sha) || sha !== extraction.data.capture_sha256 || this.blobs.verify(sha) !== "ok") {
-      return "copy_unusable";
-    }
-    const textSha = extraction.data.text_sha256;
-    const bytes = isDigest(textSha) ? this.blobs.get(textSha) : undefined;
-    const opened = bytes && open(extraction, capture, bytes);
-    if (!opened || !/\S/u.test(opened.text))
-      return "text_unusable";
-    this.read.add(sha);
-    this.read.add(textSha);
-    return opened;
-  }
-  extractionsOf(source) {
-    const captures = new Set(active(this.corpus, "capture").filter((c) => c.data.source === source).map(idOf));
-    return active(this.corpus, "extraction").filter((e) => captures.has(String(e.data.capture)));
-  }
-}
-var labelOf = (stored, page) => stored.labels.has(page) ? `printed page ${stored.labels.get(page)} (file index ${page})` : `file index ${page}, no printed label`;
-
-// packages/core/src/checks/quotes.ts
-var CHECK = "quote.present";
-var at = (name, value) => ({ name, class: "location", value });
-var meta2 = (name, value) => ({ name, class: "metadata", value });
-var stored = (name, value) => ({ name, class: "source_text", value });
-function place(search, start, end) {
-  const { text } = search;
-  const pages = text.pagesOf(start, end);
-  return [
-    at("extraction_file", text.extraction.path),
-    ...pages.length > 0 ? [at("found_on", pages.map((p) => labelOf(text, p)).join("; "))] : [],
-    meta2("text_method", `${text.method}, quality ${text.level}`)
-  ];
-}
-function compareQuotation(quotation, searches, skipped) {
-  const profile = meta2("profile", QUOTE_PROFILE);
-  let found;
-  for (const search of searches) {
-    const match = findQuotation(search.text.folded(), quotation, search.within);
-    if (match && (!found || found.match.match === "normalized" && match.match === "exact"))
-      found = { search, match };
-  }
-  if (found) {
-    const { search, match } = found;
+function viewOf(loaded) {
+  const data = loaded.manifest.data;
+  const conversion = isObject(data.conversion) ? data.conversion : {};
+  const counted = new Map;
+  const parts = loaded.parts.map((part) => {
+    const front = part.front;
+    const streams = streamsOf(part.blocks);
+    const paragraphs = paragraphsOf(part, streams.main);
+    const chapter = typeof front.chapter === "string" ? front.chapter : undefined;
+    const before = counted.get(chapter ?? "") ?? 0;
+    counted.set(chapter ?? "", before + paragraphs.length);
     return {
-      outcome: "pass",
-      evidence: [
-        meta2("match", match.match),
-        profile,
-        ...match.folds.length > 0 ? [meta2("differences_allowed", match.folds.map((f) => FOLD_WORDS[f]).join("; "))] : [],
-        ...match.joined.map((word) => stored("joined_at_line_end", word)),
-        ...match.match === "normalized" ? [stored("stored_text", search.text.text.slice(match.start, match.end))] : [],
-        ...place(search, match.start, match.end)
-      ],
-      found: { text: search.text, pages: search.text.pagesOf(match.start, match.end), match }
+      index: part.index,
+      path: part.path,
+      part,
+      labelStatus: String(front.label_status),
+      ...typeof front.label === "string" ? { label: front.label } : {},
+      ...typeof front.section === "string" ? { section: front.section } : {},
+      ...chapter ? { chapter } : {},
+      streams,
+      digest: textDigest(part.blocks),
+      paragraphs,
+      firstParagraph: before + 1
     };
-  }
-  if (searches.length === 0)
-    return { outcome: "unverifiable", reason: "text_unavailable", evidence: [profile] };
-  let closest;
-  for (const search of searches) {
-    const span = findClosest(search.text.folded(), quotation, search.within);
-    if (span && (!closest || span.distance < closest.span.distance))
-      closest = { search, span };
-  }
-  const shown = closest ? [
-    stored("stored_text", closest.search.text.text.slice(closest.span.start, closest.span.end)),
-    ...place(closest.search, closest.span.start, closest.span.end)
-  ] : [meta2("closest", "no stored passage is close enough to show")];
-  const evidence = [
-    meta2("match", closest?.span.near ? "near" : "none"),
-    profile,
-    ...shown,
-    ...skipped > 0 ? [meta2("not_searched", `${skipped} other stored text(s) of this source could not be used`)] : []
-  ];
-  if (searches.every((s) => s.text.level === "poor"))
-    return { outcome: "unverifiable", reason: "poor_quality", evidence };
-  if (closest?.span.near)
-    return { outcome: "fail", reason: "near_match", evidence };
-  if (skipped > 0)
-    return { outcome: "unverifiable", reason: "text_unavailable", evidence };
-  return { outcome: "fail", reason: "absent", evidence };
-}
-var unreadable = (corpus) => corpus.records.some((f) => f.state !== "ok" && /^records\/(extractions|captures)\//.test(f.path));
-function searchSource(corpus, texts, source) {
-  const all = texts.extractionsOf(source).map((e) => texts.of(e));
-  const searches = all.flatMap((text) => typeof text === "string" ? [] : [{ text }]);
-  return { searches, skipped: all.length - searches.length + (unreadable(corpus) ? 1 : 0) };
-}
-function anchor(texts, passage, corpus) {
-  const extraction = corpus.byId.get(String(passage.extraction));
-  const quote = isObject(passage.quote) && typeof passage.quote.exact === "string" ? passage.quote.exact : "";
-  const text = extraction?.data?.kind === "extraction" ? texts.of(extraction) : "text_unusable";
-  if (typeof text === "string" || passage.text_sha256 !== text.extraction.data.text_sha256) {
-    return { verdict: { outcome: "unverifiable", reason: "text_unavailable", evidence: [meta2("profile", QUOTE_PROFILE)] } };
-  }
-  const position = isObject(passage.position) ? passage.position : undefined;
-  const within = position ? (s) => s.start >= text.unit(Number(position.start)) && s.end <= text.unit(Number(position.end)) : undefined;
-  const verdict = compareQuotation(quote, [{ text, ...within ? { within } : {} }], 0);
-  if (verdict.outcome === "pass")
-    return { verdict, span: { text, start: verdict.found.match.start, end: verdict.found.match.end } };
-  if (within) {
-    const elsewhere = findQuotation(text.folded(), quote);
-    if (elsewhere) {
-      return {
-        verdict: {
-          outcome: "fail",
-          reason: "absent",
-          evidence: [
-            meta2("match", "none"),
-            meta2("profile", QUOTE_PROFILE),
-            meta2("problem", "the words are in this text, but not at the position the passage records"),
-            ...place({ text }, elsewhere.start, elsewhere.end)
-          ]
-        }
-      };
+  });
+  const join = (name) => {
+    let text = "";
+    const spans = [];
+    for (const part of parts) {
+      const piece = part.streams[name];
+      if (piece === "")
+        continue;
+      if (text !== "")
+        text += `
+`;
+      spans.push({ index: part.index, start: text.length, end: text.length + piece.length });
+      text += piece;
     }
-  }
-  return { verdict };
-}
-function usedPassages(corpus) {
-  const used = new Set;
-  for (const note of active(corpus, "note"))
-    for (const id of [note.data.passages].flat())
-      used.add(String(id));
-  for (const link of active(corpus, "attestation"))
-    used.add(String(link.data.evidence));
-  for (const record of active(corpus, "support_record"))
-    used.add(String(record.data.passage));
-  return active(corpus, "passage").filter((p) => used.has(idOf(p)));
-}
-var quotationCitations = (corpus) => hasManuscript(corpus) ? [] : resolveCitations(corpus).filter(({ citation }) => typeof citation.data.quotation === "string");
-var quotationSubjects = (corpus) => quotationCitations(corpus).length + usedPassages(corpus).length + active(corpus, "note").filter((n) => n.data.type === "extract").length;
-function quoteResults(corpus, blobs, read = new Set) {
-  const texts = new StoredTexts(corpus, blobs, read);
-  const results = [];
-  for (const { citation, key, matches } of quotationCitations(corpus)) {
-    if (matches.length !== 1)
-      continue;
-    const source = idOf(matches[0]);
-    const data = citation.data;
-    const quotation = data.quotation;
-    const { searches, skipped } = searchSource(corpus, texts, source);
-    const verdict = compareQuotation(quotation, searches, skipped);
-    const evidence = [
-      at("citation_file", citation.path),
-      meta2("key", key ?? String(matches[0].data.citation_key ?? source)),
-      { name: "cited_text", class: "manuscript", value: quotation },
-      ...verdict.evidence
-    ];
-    const cited = citedPages(data.locator);
-    if (verdict.found && cited) {
-      const found = verdict.found.pages.map((p) => verdict.found.text.labels.get(p));
-      if (found.every((label) => label !== undefined) && found.length > 0 && !found.some((label) => cited.includes(label))) {
-        evidence.push(meta2("cited_page_differs", `found on printed page ${found.join(", ")}; the citation gives ${cited.join(", ")}`));
-      }
-    }
-    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
-    results.push(result({
-      check: CHECK,
-      outcome: verdict.outcome,
-      ..."reason" in verdict ? { reason: verdict.reason } : {},
-      subject: subjectOf(citation),
-      locus: `${idOf(citation) ?? citation.path}#quotation`,
-      source,
-      evidence,
-      item: itemOf(citation),
-      ...sentence ? { sentence } : {}
-    }));
-  }
-  const record = (file, verdict, cited, locus) => {
-    results.push(result({
-      check: CHECK,
-      outcome: verdict.outcome,
-      ..."reason" in verdict ? { reason: verdict.reason } : {},
-      subject: subjectOf(file),
-      locus: `${idOf(file) ?? file.path}#${locus}`,
-      source: String(file.data.source),
-      evidence: [at("record_file", file.path), { name: "cited_text", class: "source_text", value: cited }, ...verdict.evidence],
-      item: itemOf(file)
-    }));
+    return { text, spans };
   };
-  for (const passage of usedPassages(corpus)) {
-    const quote = isObject(passage.data.quote) ? String(passage.data.quote.exact) : "";
-    record(passage, anchor(texts, passage.data, corpus).verdict, quote, "passage");
-  }
-  for (const note of active(corpus, "note").filter((n) => n.data.type === "extract")) {
-    const body = String(note.data.body);
-    const anchors = [note.data.passages ?? []].flat().flatMap((id) => {
-      const passage = corpus.byId.get(String(id));
-      const span = passage?.data?.kind === "passage" ? anchor(texts, passage.data, corpus).span : undefined;
-      return span ? [span] : [];
-    });
-    const verdict = anchors.length === 0 ? { outcome: "unverifiable", reason: "anchor_not_found", evidence: [meta2("profile", QUOTE_PROFILE)] } : compareQuotation(body, anchors.map((a) => ({ text: a.text, within: (s) => s.start >= a.start && s.end <= a.end })), 0);
-    record(note, verdict, body, "extract");
-  }
-  return results;
+  const streams = { main: join("main"), notes: join("notes") };
+  const folded = {};
+  const byIndex = new Map(parts.map((p) => [p.index, p]));
+  return {
+    id: idOf(loaded.manifest),
+    source: String(data.source),
+    loaded,
+    paged: data.paged === true,
+    method: String(conversion.method),
+    level: String(conversion.level),
+    parts,
+    streams,
+    folded: (name) => folded[name] ??= fold(streams[name].text, "stored"),
+    part: (index) => byIndex.get(index),
+    partsOf: (name, start, end) => streams[name].spans.filter((s) => s.start < end && s.end > start).map((s) => s.index),
+    address: (name, start, end) => streams[name].spans.filter((s) => s.start < end && s.end > start).map((s) => {
+      const part = byIndex.get(s.index);
+      const text = part.streams[name];
+      return {
+        index: s.index,
+        page_sha256: part.digest,
+        stream: name,
+        start: codePoints(text.slice(0, Math.max(0, start - s.start))),
+        end: codePoints(text.slice(0, Math.min(text.length, end - s.start)))
+      };
+    })
+  };
 }
 
-// packages/core/src/checks/not-run.ts
-var CHECK_DESCRIPTIONS = {
-  "record.valid": "the extra rules for some record kinds in this project",
-  "cite.key": "citation keys in the manuscript files",
-  "bib.uncited": "bibliography entries that are never cited",
-  "source.held": "whether you hold a copy of each cited source, with its text extracted",
-  "source.changed": "work that rests on a copy or source that has since changed",
-  "quote.present": "whether quotations appear in the stored source text",
-  "quote.self": "your own claims presented as quotations from a source",
-  "locator.extent": "whether cited pages and other locators fall inside the source",
-  "meta.source": "authors, titles and dates against your stored copies",
-  "meta.resolver": "authors, titles and dates against saved catalogue lookups",
-  "id.resolves": "whether DOIs and other identifiers name these works",
-  "number.present": "whether cited figures appear in the stored source text",
-  "construct.credit": "who each construct is credited to",
-  "claim.complete": "whether each claim has evidence, confidence and a reason",
-  "construct.complete": "whether each construct has a definition and ownership",
-  "claim.inactive": "manuscript text linked to a retired claim",
-  "cite.unlinked": "citations not linked to any claim",
-  "takeover.removal": "claims left without support by removing a citation",
-  "draft.marked": "passages marked as needing a source",
-  "support.current": "whether each cited claim has a current claim-support record",
-  "restricted.leak": "restricted site coordinates in project files",
-  "coordinate.stray": "coordinates written in project files",
-  "image.resolution": "image resolution",
-  "image.alt": "image alternative text",
-  "image.credit": "image credits",
-  "image.permission": "image permissions",
-  "image.vector": "vector images",
-  "image.font": "image fonts",
-  "image.placement": "image placement",
-  "image.metadata": "location data inside images",
-  "cite.format": "citation formatting (checked during a build)",
-  "build.uncommitted": "uncommitted changes (checked during a build)",
-  "changelog.missing": "the changelog entry (checked during a build)",
-  "package.leak": "protected text in a reviewer package (checked during a build)"
-};
-function notRun(corpus) {
-  const manuscript = hasManuscript(corpus);
-  const citations = active(corpus, "citation");
-  const has = (...kinds) => kinds.some((k) => active(corpus, k).length > 0);
-  const used = [...new Set([...resolveCitations(corpus).flatMap((r) => r.matches), ...listedSources(corpus)])];
-  const cited = citations.length > 0 || manuscript;
-  const someCitation = (field) => citations.some((c) => c.data[field] !== undefined);
-  const missing = {
-    "quote.self": has("claim") && (manuscript || someCitation("quotation")),
-    "meta.source": used.length > 0 && has("capture"),
-    "meta.resolver": manuscript || used.length > 0,
-    "id.resolves": manuscript || used.some((s) => Array.isArray(s.data.identifiers) && s.data.identifiers.length > 0),
-    "number.present": cited,
-    "construct.credit": has("construct"),
-    "claim.complete": has("claim"),
-    "construct.complete": has("construct"),
-    "claim.inactive": manuscript,
-    "cite.unlinked": manuscript,
-    "takeover.removal": has("round_choice"),
-    "draft.marked": manuscript,
-    "support.current": has("claim"),
-    "restricted.leak": active(corpus, "place_location").some((f) => isObject(f.data.sensitivity) && f.data.sensitivity.class !== "public"),
-    ...Object.fromEntries(["resolution", "alt", "credit", "permission", "vector", "font", "placement", "metadata"].map((n) => [`image.${n}`, has("image")])),
-    "cite.format": false,
-    "build.uncommitted": false,
-    "changelog.missing": false,
-    "package.leak": false
-  };
-  const entries = Object.entries(missing).map(([check, present]) => ({ check, reason: present ? "not_implemented" : "input_absent" }));
-  if (corpus.records.some((f) => f.state === "ok" && !FULLY_CHECKED_KINDS.has(String(f.data?.kind)))) {
-    entries.push({ check: "record.valid", reason: "not_implemented" });
+class SourceTexts {
+  corpus;
+  known = new Map;
+  constructor(corpus) {
+    this.corpus = corpus;
   }
-  const built = [
-    ["source.changed", dependants(corpus).length > 0],
-    ["quote.present", quotationSubjects(corpus) > 0],
-    ["locator.extent", locatorCitations(corpus).length > 0]
-  ];
-  for (const [check, subjects] of built) {
-    if (manuscript)
-      entries.push({ check, reason: "not_implemented" });
-    else if (!subjects)
-      entries.push({ check, reason: "input_absent" });
+  view(id) {
+    if (!this.known.has(id)) {
+      const loaded = this.corpus.texts.get(id);
+      this.known.set(id, loaded?.usable ? viewOf(loaded) : undefined);
+    }
+    return this.known.get(id);
   }
-  if (manuscript)
-    entries.push({ check: "source.held", reason: "not_implemented" });
-  else if (citations.length === 0)
-    entries.push({ check: "source.held", reason: "input_absent" });
-  if (manuscript)
-    entries.push({ check: "cite.key", reason: "not_implemented" });
-  else if (citations.length === 0)
-    entries.push({ check: "cite.key", reason: "input_absent" });
-  if (manuscript && listedSources(corpus).length > 0)
-    entries.push({ check: "bib.uncited", reason: "not_implemented" });
-  else if (listedSources(corpus).length === 0)
-    entries.push({ check: "bib.uncited", reason: "input_absent" });
-  return entries.sort((a, b) => a.check < b.check ? -1 : a.check > b.check ? 1 : 0);
+  idsOf(source) {
+    return [...this.corpus.texts].filter(([, t]) => t.manifest.data.source === source && !isRetired(t.manifest.data)).sort(([, a], [, b]) => a.directory < b.directory ? -1 : 1).map(([id]) => id);
+  }
+  of(source) {
+    const ids = this.idsOf(source);
+    const views = ids.flatMap((id) => this.view(id) ?? []);
+    return { views, unusable: ids.length - views.length };
+  }
 }
+function placeOf(view, index) {
+  const part = view.part(index);
+  if (!part)
+    return `index ${index}`;
+  if (view.paged)
+    return part.label !== undefined ? `printed page ${part.label} (index ${index})` : `page index ${index}, no printed label`;
+  return [part.chapter ? `chapter ${part.chapter}` : "", `section ${index}${part.section ? ` "${part.section}"` : ""}`].filter(Boolean).join(", ");
+}
+function paragraphNumbers(part, start, end) {
+  return part.paragraphs.flatMap((p, i) => p.start < end && p.end > start ? [part.firstParagraph + i] : []);
+}
+
 // packages/core/src/checks/coordinates.ts
 var DECIMAL = String.raw`[-+\u2212]?\d{1,3}\.\d{3,}`;
 var HEMI = (letters) => String.raw`\d{1,3}(?:\.\d+)?\s*\u00B0\s*(?:\d{1,2}(?:\.\d+)?\s*(?:\u2032|\u2019|')\s*)?(?:\d{1,2}(?:\.\d+)?\s*(?:\u2033|\u201D|\\"|")\s*)?[${letters}](?![A-Za-z])`;
@@ -108094,240 +108217,1164 @@ function findCoordinates(line) {
   }
   return spans.map(([start]) => start).sort((a, b) => a - b);
 }
-function scannedFiles(corpus) {
-  const files = [corpus.settings, ...corpus.records, ...corpus.rules ? [corpus.rules] : [], ...corpus.manuscript];
-  return files.sort((a, b) => compareCodePoints(a.path, b.path));
+function scannedGroups(corpus) {
+  const single = [corpus.settings, ...corpus.records.filter((f) => !f.path.startsWith("sources/")), ...corpus.rules ? [corpus.rules] : [], ...corpus.manuscript, ...corpus.research];
+  const grouped = new Map(single.map((f) => [f.path, [f]]));
+  for (const file of corpus.sources) {
+    const [, name, ...rest] = file.path.split("/");
+    const subject = rest.length > 0 ? `sources/${name}` : file.path;
+    grouped.set(subject, [...grouped.get(subject) ?? [], file]);
+  }
+  return [...grouped].sort(([a], [b]) => compareCodePoints(a, b)).map(([subject, files]) => ({ subject, files: files.sort((a, b) => compareCodePoints(a.path, b.path)) }));
 }
 function coordinateResults(corpus) {
   const check = "coordinate.stray";
-  return scannedFiles(corpus).flatMap((file) => {
-    const evidence = [{ name: "file", class: "location", value: file.path }];
-    let text;
-    try {
-      if (!file.bytes)
-        throw new Error("unreadable");
-      text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
-    } catch {
-      return [result({ check, outcome: "unverifiable", reason: "file_unreadable", subject: file.path, locus: file.path, evidence })];
-    }
-    const found = text.split(`
-`).flatMap((line, i) => findCoordinates(line).map((column) => ({ line: i + 1, column: column + 1 })));
+  return scannedGroups(corpus).flatMap(({ subject, files }) => {
+    const grouped = files.length > 1 || files[0].path !== subject;
+    const unreadable = [];
+    const found = files.flatMap((file) => {
+      let text;
+      try {
+        if (!file.bytes)
+          throw new Error("unreadable");
+        text = new TextDecoder("utf-8", { fatal: true }).decode(file.bytes);
+      } catch {
+        unreadable.push(file.path);
+        return [];
+      }
+      return text.split(`
+`).flatMap((line, i) => findCoordinates(line).map((column) => ({ file: file.path, line: i + 1, column: column + 1 })));
+    });
+    const evidence = [{ name: "file", class: "location", value: subject }];
+    const out = unreadable.map((path) => result({ check, outcome: "unverifiable", reason: "file_unreadable", subject: path, locus: path, evidence: [{ name: "file", class: "location", value: path }] }));
     if (found.length === 0)
-      return [result({ check, outcome: "pass", subject: file.path, locus: file.path, evidence })];
-    return found.map((at, ordinal) => result({
+      return out.length > 0 ? out : [result({ check, outcome: "pass", subject, locus: subject, evidence })];
+    if (grouped) {
+      return [...out, result({
+        check,
+        outcome: "fail",
+        reason: "coordinate_text",
+        subject,
+        locus: subject,
+        evidence: [
+          ...evidence,
+          { name: "count", class: "metadata", value: `${found.length} position(s)` },
+          { name: "positions", class: "location", value: found.map((at) => `${at.file.slice(subject.length + 1)} line ${at.line}, column ${at.column}`).join("; ") }
+        ]
+      })];
+    }
+    return [...out, ...found.map((at, ordinal) => result({
       check,
       outcome: "fail",
       reason: "coordinate_text",
-      subject: file.path,
-      locus: `${file.path}#${ordinal}`,
+      subject,
+      locus: `${subject}#${ordinal}`,
       evidence: [...evidence, { name: "position", class: "location", value: `line ${at.line}, column ${at.column}` }]
-    }));
+    }))];
   });
 }
-// packages/core/src/render.ts
-function groupResults(results) {
-  const groups = new Map;
-  for (const result of results) {
-    const key = result.evidence.find((e) => e.name === "key" || e.name === "points_at");
-    const cause = [result.check, result.reason_code ?? "", key?.value ?? ""].join("\x00");
-    groups.set(cause, [...groups.get(cause) ?? [], result]);
-  }
-  return [...groups.values()];
+
+// packages/core/src/verification.ts
+var list = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+var records = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+var atOf = (data, field) => String(isObject(data[field]) ? data[field].at : "");
+var reconversions = (corpus, text) => records(corpus, "comparison_run").filter((r) => r.data.text === text && r.data.method === "reconversion").sort((a, b) => atOf(b.data, "run").localeCompare(atOf(a.data, "run")) || (a.path < b.path ? 1 : -1));
+var comparedDigest = (method, blocks) => method === "reconversion" ? sha256(`${textDigest(blocks)}
+${asConverted(blocks)}`) : textDigest(blocks);
+function currentRun(run, text, tools) {
+  const now = new Map(text.parts.map((p) => [p.index, comparedDigest(String(run.method), p.blocks)]));
+  const pages = list(run.pages);
+  if (pages.some((p) => now.get(Number(p.index)) !== p.sha256))
+    return false;
+  if (run.method !== "reconversion")
+    return true;
+  return pages.length === now.size && list(run.tools).every((t) => tools[String(t.name)] === undefined || tools[String(t.name)] === t.version);
 }
-var printable = (text) => text.replace(/\r?\n|\f/g, " \u23CE ").replace(/\u00ad/g, "\xAC").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "?");
-function renderFindings(results) {
-  const lines = [];
-  groupResults(results.filter((r) => r.open)).forEach((group, i) => {
-    const first = group[0];
-    const verdict = first.outcome === "fail" ? "PROBLEM" : "COULD NOT CHECK";
-    const places = group.length === 1 ? "" : `, ${group.length} places`;
-    lines.push("", `${i + 1}. ${verdict}: ${first.message}  [${first.check}${places}]`, `   Why it matters: ${first.why}`);
-    for (const suggestion of first.suggestions)
-      lines.push(`   What to do: ${suggestion}`);
-    for (const item of group) {
-      lines.push(`   - ${printable(item.subject)}`);
-      for (const e of item.evidence)
-        lines.push(`       ${e.name.replaceAll("_", " ")}: ${printable(e.value)}`);
+function reviewDigest(text, scope, index) {
+  const part = text.parts.find((p) => p.index === index);
+  if (!part)
+    return;
+  return scope === "page_number" ? sha256(String(part.front.label ?? "")) : textDigest(part.blocks);
+}
+function currentReview(review, text) {
+  return list(review.pages).every((p) => reviewDigest(text, String(review.scope), Number(p.index)) === p.sha256);
+}
+var byPerson = (review) => isObject(review.reviewed) && isObject(review.reviewed.by) && review.reviewed.by.kind === "person";
+function coverageOf(corpus, text, tools = {}) {
+  const id = idOf(text.manifest);
+  const data = text.manifest.data;
+  const whole = new Set;
+  let stale = 0;
+  let flags = 0;
+  for (const file of records(corpus, "text_review").filter((r) => r.data.text === id)) {
+    const review = file.data;
+    if (!currentReview(review, text))
+      stale++;
+    else if (byPerson(review) && review.scope === "whole_page" && review.outcome !== "flagged") {
+      for (const p of list(review.pages))
+        whole.add(Number(p.index));
     }
+    if (review.outcome === "flagged" || review.outcome === "disagrees")
+      flags += Math.max(1, list(review.flags).length);
+  }
+  const runs = records(corpus, "comparison_run").filter((r) => r.data.text === id).sort((a, b) => a.path < b.path ? -1 : 1).map((file) => {
+    const run = file.data;
+    const pages = list(run.pages);
+    const words = pages.reduce((n, p) => n + Number(p.words), 0);
+    const differing = pages.reduce((n, p) => n + Number(p.differing_words), 0);
+    return {
+      run: idOf(file),
+      method: String(run.method),
+      against: String(run.against),
+      independent: run.independent === true,
+      current: currentRun(run, text, tools),
+      parts: pages.length,
+      differing_parts: pages.filter((p) => Number(p.differing_words) > 0).length,
+      agreement_permille: words === 0 ? 1000 : Math.max(0, Math.floor(1000 * (words - differing) / words)),
+      disagreements: pages.flatMap((p) => list(p.differences).map((d) => ({ index: Number(p.index), reading: String(d.reading), other: String(d.other) })))
+    };
   });
-  return lines;
-}
-function quotationNotes(results) {
-  const passed = results.filter((r) => r.check === "quote.present" && r.outcome === "pass");
-  const value = (r, name) => r.evidence.filter((e) => e.name === name).map((e) => e.value);
-  const lines = [];
-  const joined = passed.flatMap((r) => value(r, "joined_at_line_end").map((word) => `   - ${printable(r.subject)}: ${printable(word)}`));
-  if (joined.length > 0) {
-    lines.push("", "For information, not a finding: these quotations matched after joining a word the stored text splits at a line end.", "If the hyphen belongs to the word, the quotation should keep it: look at the page.", ...joined);
-  }
-  const elsewhere = passed.flatMap((r) => value(r, "cited_page_differs").map((note) => `   - ${printable(r.subject)}: ${printable(note)}`));
-  if (elsewhere.length > 0) {
-    lines.push("", "For information, not a finding: these quotations are in the source, but not on the page the citation gives.", "The quotation check does not test the cited page. Check the page number.", ...elsewhere);
-  }
-  return lines;
-}
-function renderReport(body) {
-  const { summary } = body;
-  const lines = [];
-  if (body.label === "checked_clean") {
-    lines.push("CHECKED CLEAN: the checks found nothing open.", "This does not mean that the book is correct. It covers only what is in these project files.");
-  } else {
-    const parts = [
-      `${summary.fail} problem(s)`,
-      `${summary.unverifiable} could not be checked`,
-      `${summary.not_implemented} kind(s) of check this version does not run`
-    ];
-    lines.push(`OPEN FINDINGS: ${parts.join(", ")}. Nothing is blocked.`);
-  }
-  lines.push(`Checked the whole project: ${summary.pass} result(s) passed.`);
-  lines.push(...renderFindings(body.results));
-  lines.push(...quotationNotes(body.results));
-  const missing = body.not_run.filter((n) => n.reason === "not_implemented");
-  if (missing.length > 0) {
-    lines.push("", "NOT CHECKED: this version does not run these, so the project is not called checked clean.", "Why it matters: a mistake of one of these kinds would go unnoticed. What to do: check them by hand where they matter.");
-    for (const entry of missing)
-      lines.push(`   - ${CHECK_DESCRIPTIONS[entry.check]}  [${entry.check}]`);
-  }
-  if (body.unreviewed.length > 0) {
-    lines.push("", `For information, not a finding: ${body.unreviewed.length} cited item(s) are unreviewed or not admitted.`);
-    for (const item of body.unreviewed)
-      lines.push(`   - ${item.record} (${item.reason.replace("_", " ")})`);
-  }
-  return `${lines.join(`
-`)}
-`;
-}
-// packages/core/src/checks/held.ts
-var at2 = (name, value) => ({ name, class: "location", value });
-var meta3 = (name, value) => ({ name, class: "metadata", value });
-var unreadableIn2 = (corpus, ...directories) => corpus.records.some((f) => f.state !== "ok" && directories.some((d) => f.path.startsWith(`records/${d}/`)));
-function fits(extraction, bytes) {
-  const { text_size, page_spans } = extraction.data;
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    return "inconsistent";
-  }
-  if (text_size !== bytes.length)
-    return "inconsistent";
-  if (page_spans !== undefined && (!Array.isArray(page_spans) || checkPageSpans(page_spans, [...text].length).length > 0)) {
-    return "inconsistent";
-  }
-  return /\S/u.test(text) ? "ok" : "empty";
-}
-function holding(corpus, source, blobs, read) {
-  const captures = active(corpus, "capture").filter((c) => c.data.source === source);
-  if (captures.length === 0) {
-    return unreadableIn2(corpus, "captures") ? { outcome: "unverifiable", reason: "record_unreadable", evidence: [] } : { outcome: "fail", reason: "no_copy", evidence: [] };
-  }
-  const damage = [];
-  let good;
-  const bare = [];
-  for (const capture of captures) {
-    const sha = capture.data.sha256;
-    const here = [at2("capture_file", capture.path), ...isDigest(sha) ? [meta3("copy_sha256", sha)] : []];
-    const state = isDigest(sha) ? blobs.verify(sha) : "altered";
-    if (state !== "ok") {
-      damage.push({ reason: state === "altered" ? "copy_altered" : "copy_missing", evidence: here });
-      continue;
-    }
-    if (capture.data.size !== blobs.get(sha)?.length) {
-      damage.push({ reason: "copy_altered", evidence: [...here, meta3("problem", "the recorded size differs from the stored file's size")] });
-      continue;
-    }
-    read.add(sha);
-    const extractions = active(corpus, "extraction").filter((e) => e.data.capture === idOf(capture) && e.data.capture_sha256 === sha);
-    if (extractions.length === 0) {
-      bare.push(...here);
-      continue;
-    }
-    for (const extraction of extractions) {
-      const textSha = extraction.data.text_sha256;
-      const there = [...here, at2("extraction_file", extraction.path), ...isDigest(textSha) ? [meta3("text_sha256", textSha)] : []];
-      const bytes = isDigest(textSha) ? blobs.get(textSha) : undefined;
-      if (!bytes) {
-        const textState = isDigest(textSha) ? blobs.verify(textSha) : "altered";
-        damage.push({ reason: textState === "altered" ? "text_altered" : "text_missing", evidence: there });
-        continue;
-      }
-      const state = fits(extraction, bytes);
-      if (state === "inconsistent")
-        damage.push({ reason: "text_inconsistent", evidence: there });
-      else if (state === "empty")
-        bare.push(...there, meta3("problem", "the saved text holds no characters"));
-      else {
-        read.add(textSha);
-        const quality = isObject(extraction.data.quality) ? extraction.data.quality : {};
-        good ??= [...there, meta3("text_method", `${String(quality.method)}, quality ${String(quality.level)}`)];
-      }
-    }
-  }
-  if (damage.length > 0)
-    return { outcome: "unverifiable", reason: damage[0].reason, evidence: damage[0].evidence };
-  if (good)
-    return { outcome: "pass", evidence: good };
-  return unreadableIn2(corpus, "extractions", "captures") ? { outcome: "unverifiable", reason: "record_unreadable", evidence: bare } : { outcome: "fail", reason: "no_text", evidence: bare };
-}
-function heldResults(corpus, blobs, read = new Set) {
-  const check = "source.held";
-  const seen = new Map;
-  const of = (source) => {
-    const known = seen.get(source) ?? holding(corpus, source, blobs, read);
-    seen.set(source, known);
-    return known;
+  return {
+    text: id,
+    source: String(data.source),
+    directory: text.directory,
+    method: String(isObject(data.conversion) ? data.conversion.method : ""),
+    parts: text.parts.length,
+    reviewed_by_person: whole.size,
+    stale_reviews: stale,
+    flags,
+    runs
   };
-  const cited = new Set;
-  const results = hasManuscript(corpus) ? [] : resolveCitations(corpus).flatMap(({ citation, key, matches }) => {
+}
+function coverageWords(c) {
+  const compared = c.runs.filter((r) => r.current).map((r) => `${r.method === "reconversion" ? "fresh conversion" : "second text"}: ${r.parts - r.differing_parts} of ${r.parts} parts agree`);
+  return [
+    `${c.reviewed_by_person} of ${c.parts} parts reviewed whole by a person`,
+    ...compared,
+    ...c.flags > 0 ? [`${c.flags} flag(s)`] : [],
+    ...c.stale_reviews > 0 ? [`${c.stale_reviews} stale review(s)`] : []
+  ].join("; ");
+}
+function diffWords(reading, other, most = 20) {
+  const a = reading.split(/\s+/).filter(Boolean);
+  const b = other.split(/\s+/).filter(Boolean);
+  const words = Math.max(a.length, b.length);
+  let start = 0;
+  while (start < a.length && start < b.length && a[start] === b[start])
+    start++;
+  let endA = a.length;
+  let endB = b.length;
+  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
+    endA--;
+    endB--;
+  }
+  const x = a.slice(start, endA);
+  const y = b.slice(start, endB);
+  if (x.length === 0 && y.length === 0)
+    return { words, differing: 0, differences: [] };
+  if (x.length * y.length > 4000000) {
+    return { words, differing: Math.max(x.length, y.length), differences: [{ reading: x.slice(0, 40).join(" "), other: y.slice(0, 40).join(" ") }] };
+  }
+  const width = y.length + 1;
+  const table = new Int32Array((x.length + 1) * width);
+  for (let i = x.length - 1;i >= 0; i--) {
+    for (let j = y.length - 1;j >= 0; j--) {
+      table[i * width + j] = x[i] === y[j] ? table[(i + 1) * width + j + 1] + 1 : Math.max(table[(i + 1) * width + j], table[i * width + j + 1]);
+    }
+  }
+  const differences = [];
+  let differing = 0;
+  let left = [];
+  let right = [];
+  const close = () => {
+    if (left.length === 0 && right.length === 0)
+      return;
+    differing += Math.max(left.length, right.length);
+    if (differences.length < most)
+      differences.push({ reading: left.slice(0, 40).join(" "), other: right.slice(0, 40).join(" ") });
+    left = [];
+    right = [];
+  };
+  for (let i = 0, j = 0;i < x.length || j < y.length; ) {
+    if (i < x.length && j < y.length && x[i] === y[j]) {
+      close();
+      i++;
+      j++;
+    } else if (j >= y.length || i < x.length && table[(i + 1) * width + j] >= table[i * width + j + 1])
+      left.push(x[i++]);
+    else
+      right.push(y[j++]);
+  }
+  close();
+  return { words, differing, differences };
+}
+function asConverted(blocks) {
+  const s = streamsOf(blocks, true);
+  return [s.main, s.notes, s.furniture].join(`
+`);
+}
+
+// packages/core/src/checks/records.ts
+function subjectOf(file) {
+  const id = idOf(file);
+  const kind = String(file.data?.kind);
+  const owns = id !== undefined && isRecordId(kind, id) && (kind === "source_text" ? /^sources\/[^/]+\/source\.md$/.test(file.path) : file.path.endsWith(`/${id}.json`));
+  return owns ? id : file.path;
+}
+function itemOf(file) {
+  const { review: _r, created: _c, changed: _m, legacy: _l, x: _x, ...content } = file.data;
+  return { record: idOf(file), content_sha256: digest(content) };
+}
+var location = (name, value) => ({ name, class: "location", value });
+function fileResults(file) {
+  const check = "record.valid";
+  const subject = subjectOf(file);
+  const evidence = [location("file", file.path)];
+  const finding = (outcome, reason, locus, extra = []) => result({ check, outcome, reason, subject, locus: `${file.path}#${locus}`, evidence: [...evidence, ...extra] });
+  if (file.state === "unreadable") {
+    return [finding("unverifiable", "record_unreadable", "file", [{ name: "problem", class: "metadata", value: file.unreadable }])];
+  }
+  if (file.state === "version_unsupported")
+    return [finding("unverifiable", "version_unsupported", "file")];
+  const results = file.problems.map((problem) => {
+    const extra = [
+      ...problem.field ? [location("field", problem.field)] : [],
+      { name: "problem", class: "metadata", value: PROBLEMS[problem.code] },
+      ...problem.target ? [location(problem.code === "wrong_location" ? "expected_path" : "points_at", problem.target)] : []
+    ];
+    return finding("fail", problemTemplate(problem).split(":")[1], `${problem.code}${problem.field}`, extra);
+  });
+  if (file.state === "ok" && !file.canonical && file.formattable)
+    results.push(finding("fail", "record_noncanonical", "form"));
+  return results.length > 0 ? results : [result({ check, outcome: "pass", subject, locus: file.path, evidence })];
+}
+function rulesResults(corpus) {
+  const file = corpus.rules;
+  if (!file)
+    return [];
+  const check = "record.valid";
+  const path = file.path;
+  if (!file.bytes) {
+    return [result({ check, outcome: "unverifiable", reason: "record_unreadable", subject: path, locus: path, evidence: [location("file", path)] })];
+  }
+  const problems = checkRuleHeadings(new TextDecoder().decode(file.bytes));
+  if (problems.length === 0)
+    return [result({ check, outcome: "pass", subject: path, locus: path, evidence: [location("file", path)] })];
+  return problems.map((p, i) => result({
+    check,
+    outcome: "fail",
+    reason: p.code,
+    subject: path,
+    locus: `${path}#${p.code}#${p.rule ?? i}`,
+    evidence: [location("file", path), location("line", String(p.line))]
+  }));
+}
+
+// packages/core/src/checks/held.ts
+var at = (name, value) => ({ name, class: "location", value });
+var meta = (name, value) => ({ name, class: "metadata", value });
+var manifestsUnread = (corpus) => corpus.records.some((f) => f.state !== "ok" && f.state !== "stray" && f.path.startsWith("sources/"));
+function holding(texts, source) {
+  const corpus = texts.corpus;
+  const ids = texts.idsOf(source);
+  if (ids.length === 0) {
+    return manifestsUnread(corpus) ? { outcome: "unverifiable", reason: "record_unreadable", evidence: [] } : { outcome: "fail", reason: "no_source_file", evidence: [] };
+  }
+  const damaged = ids.filter((id) => !texts.view(id));
+  if (damaged.length > 0) {
+    return { outcome: "unverifiable", reason: "source_damaged", evidence: damaged.map((id) => at("source_text", corpus.texts.get(id).manifest.path)) };
+  }
+  const evidence = [];
+  let held = false;
+  for (const id of ids) {
+    const view = texts.view(id);
+    if (view.streams.main.text === "" && view.streams.notes.text === "")
+      continue;
+    held = true;
+    evidence.push(at("source_text", view.loaded.manifest.path), meta("text_method", `${view.method}, quality ${view.level}`), meta("verification", coverageWords(coverageOf(corpus, view.loaded))));
+  }
+  return held ? { outcome: "pass", evidence } : { outcome: "fail", reason: "no_text", evidence: ids.map((id) => at("source_text", corpus.texts.get(id).manifest.path)) };
+}
+function heldResults(corpus, texts = new SourceTexts(corpus)) {
+  if (hasManuscript(corpus))
+    return [];
+  return resolveCitations(corpus).flatMap(({ citation, key, matches }) => {
     if (matches.length !== 1)
       return [];
     const source = idOf(matches[0]);
-    cited.add(source);
-    const held = of(source);
+    const held = holding(texts, source);
     const data = citation.data;
     const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
-    const evidence = [
-      at2("citation_file", citation.path),
-      meta3("key", key ?? String(matches[0].data.citation_key ?? source)),
-      at2("source_file", matches[0].path),
-      ...held.evidence
-    ];
     return [result({
-      check,
+      check: "source.held",
       outcome: held.outcome,
       ...held.reason ? { reason: held.reason } : {},
       subject: subjectOf(citation),
       locus: idOf(citation) ?? citation.path,
       source,
-      evidence,
+      evidence: [at("citation_file", citation.path), meta("key", key ?? String(matches[0].data.citation_key ?? source)), at("source_file", matches[0].path), ...held.evidence],
       item: itemOf(citation),
       ...sentence ? { sentence } : {}
     })];
   });
-  for (const file of active(corpus, "source")) {
-    const source = idOf(file);
-    if (cited.has(source) || !active(corpus, "capture").some((c) => c.data.source === source))
+}
+
+// packages/core/src/checks/locators.ts
+function numberOf(label) {
+  if (/^[1-9]\d{0,6}$/.test(label))
+    return { style: "arabic", value: Number(label) };
+  const lower = fromRoman(label.toLowerCase());
+  if (lower === undefined)
+    return;
+  if (label === label.toLowerCase())
+    return { style: "roman_lower", value: lower };
+  return label === label.toUpperCase() ? { style: "roman_upper", value: lower } : undefined;
+}
+var writeAs = (style, value) => style === "arabic" ? String(value) : style === "roman_lower" ? toRoman(value) : toRoman(value).toUpperCase();
+function locatorParts(value, end, known = new Set) {
+  const whole = value.trim();
+  if (typeof end === "string")
+    return [{ first: whole, last: end.trim() }];
+  if (known.has(whole))
+    return [{ first: whole, last: whole }];
+  return whole.split(/\s*,\s*/).map((piece) => {
+    const ends = piece.split(/\s*(?:-{1,2}|\u2013|\u2014)\s*/);
+    return ends.length === 2 && !known.has(piece) ? { first: ends[0], last: ends[1] } : { first: piece, last: piece };
+  });
+}
+var PAGE_TERMS = new Set(["page", "folio"]);
+function citedPages(locator) {
+  if (!isObject(locator) || !PAGE_TERMS.has(String(locator.label)) || typeof locator.value !== "string")
+    return;
+  const labels = [];
+  for (const part of locatorParts(locator.value, locator.end)) {
+    const [first, last] = [numberOf(part.first), numberOf(part.last)];
+    if (part.first === part.last)
+      labels.push(part.first);
+    else if (first && last && first.style === last.style && last.value >= first.value && last.value - first.value < 100) {
+      for (let v = first.value;v <= last.value; v++)
+        labels.push(writeAs(first.style, v));
+    } else
+      return;
+  }
+  return labels;
+}
+function mappedPlaces(texts, source, term) {
+  const out = { labels: new Set, from: [], unmapped: 0 };
+  for (const view of texts.of(source).views) {
+    const found = term === "chapter" ? view.parts.flatMap((p) => p.chapter ?? []) : term === "paragraph" ? view.paged ? [] : view.parts.flatMap((p) => p.paragraphs.map((_, i) => String(p.firstParagraph + i))) : view.paged ? view.parts.flatMap((p) => p.label ?? []) : [];
+    if (found.length === 0)
       continue;
-    const held = of(source);
-    if (!held.reason?.endsWith("_altered") && held.reason !== "text_inconsistent")
-      continue;
-    results.push(result({
+    for (const label of found)
+      out.labels.add(label);
+    if (term === "page" || term === "folio")
+      out.unmapped = Math.max(out.unmapped, view.parts.filter((p) => p.label === undefined).length);
+    out.from.push(view.loaded.manifest);
+  }
+  return out;
+}
+function describeLabels(labels) {
+  const numbered = new Map;
+  const other = [];
+  for (const label of labels) {
+    const n = numberOf(label);
+    if (n)
+      numbered.set(n.style, [...numbered.get(n.style) ?? [], n.value]);
+    else
+      other.push(label);
+  }
+  const out = [];
+  for (const style of ["roman_lower", "roman_upper", "arabic"]) {
+    const values = [...new Set(numbered.get(style) ?? [])].sort((a, b) => a - b);
+    for (let i = 0, j = 0;i < values.length; i = j + 1) {
+      for (j = i;values[j + 1] === values[j] + 1; j++)
+        ;
+      out.push(i === j ? writeAs(style, values[i]) : `${writeAs(style, values[i])}-${writeAs(style, values[j])}`);
+    }
+  }
+  if (other.length > 0)
+    out.push(other.length > 12 ? `${other.slice(0, 12).join(", ")} and ${other.length - 12} more` : other.join(", "));
+  return out.join(", ");
+}
+function against(part, ranges) {
+  const [first, last] = [numberOf(part.first), numberOf(part.last)];
+  if (!first || !last || first.style !== last.style || last.value < first.value)
+    return "unparsable";
+  const same = ranges.filter((r) => r.style === first.style);
+  if (same.length === 0)
+    return "no_style";
+  if (same.some((r) => first.value >= r.first && last.value <= r.last))
+    return "inside";
+  const low = Math.min(...same.map((r) => r.first));
+  const high = Math.max(...same.map((r) => r.last));
+  return first.value >= low && last.value <= high ? "gap" : "outside";
+}
+function runs(labels) {
+  const values = [...labels].flatMap((l) => numberOf(l) ?? []).sort((a, b) => a.style.localeCompare(b.style) || a.value - b.value);
+  const out = [];
+  for (const { style, value } of values) {
+    const last = out.at(-1);
+    if (last && last.style === style && value <= last.last + 1)
+      last.last = Math.max(last.last, value);
+    else
+      out.push({ style, first: value, last: value });
+  }
+  return out;
+}
+var meta2 = (name, value) => ({ name, class: "metadata", value });
+var unverifiable = (reason, ...evidence) => ({ outcome: "unverifiable", reason, evidence });
+function overall(wheres, outside) {
+  if (wheres.includes("outside"))
+    return { outcome: "fail", reason: outside };
+  if (wheres.includes("unparsable"))
+    return { outcome: "unverifiable", reason: "unparsable_locator" };
+  if (wheres.includes("no_style"))
+    return { outcome: "unverifiable", reason: "no_extent" };
+  if (wheres.includes("gap"))
+    return { outcome: "unverifiable", reason: "page_not_mapped" };
+  return { outcome: "pass" };
+}
+var TERMS = new Set(["page", "folio", "chapter", "paragraph"]);
+function judgeLocator(texts, source, locator) {
+  const term = String(locator.label);
+  const value = String(locator.value);
+  const recorded = (Array.isArray(source.extents) ? source.extents : []).filter(isObject).filter((e) => e.label === term);
+  if (recorded.length > 0) {
+    const shown = meta2("extent", `${term} ${recorded.map((e) => `${String(e.first)}-${String(e.last)}`).join(", ")} (recorded on the source)`);
+    const ranges = recorded.flatMap((e) => {
+      const [first, last] = [numberOf(String(e.first)), numberOf(String(e.last))];
+      return first && last && first.style === last.style ? [{ style: first.style, first: first.value, last: last.value }] : [];
+    });
+    const wheres = locatorParts(value, locator.end).map((p) => {
+      if (recorded.some((e) => p.first === p.last && (p.first === e.first || p.first === e.last)))
+        return "inside";
+      const where = against(p, ranges);
+      return where === "gap" ? "outside" : where;
+    });
+    return { ...overall(wheres, "outside_extent"), evidence: [shown] };
+  }
+  const ids = texts.idsOf(String(source.id));
+  if (manifestsUnread(texts.corpus) || ids.some((id) => !texts.view(id)))
+    return unverifiable("record_unreadable");
+  const mapped = TERMS.has(term) ? mappedPlaces(texts, String(source.id), term) : undefined;
+  if (!mapped || mapped.labels.size === 0) {
+    const unpaged = (term === "page" || term === "folio") && ids.length > 0 && ids.every((id) => !texts.view(id).paged);
+    return unverifiable("no_extent", ...unpaged ? [meta2("problem", "the source's text here has no pages, so a page number cannot be checked against it")] : []);
+  }
+  const name = term === "chapter" ? "chapters" : term === "paragraph" ? "paragraphs" : "printed pages";
+  const evidence = [
+    meta2("extent", `${name} ${describeLabels(mapped.labels)} (in your source files)`),
+    ...mapped.from.map((e) => ({ name: "source_text", class: "location", value: e.path })),
+    ...mapped.unmapped > 0 ? [meta2("pages_without_a_label", `${mapped.unmapped} page(s)`)] : []
+  ];
+  const ranges = runs(mapped.labels);
+  const wheres = locatorParts(value, locator.end, mapped.labels).map((part) => {
+    if (part.first === part.last && mapped.labels.has(part.first))
+      return "inside";
+    return against(part, ranges);
+  });
+  return { ...overall(wheres, "outside_page_map"), evidence };
+}
+var locatorCitations = (corpus) => hasManuscript(corpus) ? [] : resolveCitations(corpus).filter(({ citation }) => isObject(citation.data.locator));
+function locatorResults(corpus, texts = new SourceTexts(corpus)) {
+  return locatorCitations(corpus).flatMap(({ citation, key, matches }) => {
+    if (matches.length !== 1)
+      return [];
+    const data = citation.data;
+    const locator = data.locator;
+    const source = matches[0];
+    const verdict = judgeLocator(texts, source.data, locator);
+    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
+    const shown = typeof locator.end === "string" ? `${String(locator.value)} to ${locator.end}` : String(locator.value);
+    return [result({
+      check: "locator.extent",
+      outcome: verdict.outcome,
+      ...verdict.reason ? { reason: verdict.reason } : {},
+      subject: subjectOf(citation),
+      locus: `${idOf(citation) ?? citation.path}#locator`,
+      source: idOf(source),
+      evidence: [
+        { name: "citation_file", class: "location", value: citation.path },
+        meta2("key", key ?? String(source.data.citation_key ?? idOf(source))),
+        { name: "locator", class: "manuscript", value: `${String(locator.label)} ${shown}` },
+        { name: "source_file", class: "location", value: source.path },
+        ...verdict.evidence
+      ],
+      item: itemOf(citation),
+      ...sentence ? { sentence } : {}
+    })];
+  });
+}
+
+// packages/core/src/checks/metadata.ts
+var list2 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+var text = (value) => typeof value === "string" && value !== "" ? value : undefined;
+var foldName = (value) => value.replace(/(\p{L})[-\u2010]\s*\n\s*(?=\p{Ll})/gu, "$1").normalize("NFKD").replace(/\p{M}/gu, "").toLowerCase().replace(/(?<=\p{L})(?=\p{N})/gu, " ").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+var holds = (within, words) => words !== "" && ` ${within} `.includes(` ${words} `);
+var mainTitle = (title) => title.split(/(?<=\S)\s*[:.;]\s+/)[0];
+function titlesMatch(a, b) {
+  const [x, y] = [foldName(a), foldName(b)];
+  return x === y || x === foldName(mainTitle(b)) || foldName(mainTitle(a)) === y;
+}
+function describe(source) {
+  const title = isObject(source.title) ? text(source.title.value) : undefined;
+  const authors = list2(source.contributions).filter((c) => c.role === "author" || c.role === "editor").flatMap((c) => {
+    const name = isObject(c.as_printed) ? c.as_printed : {};
+    return text(name.family) ?? text(name.literal) ?? [];
+  });
+  const year = isObject(source.issued) ? /\d{4}/.exec(String(source.issued.edtf ?? ""))?.[0] : undefined;
+  const container = list2(source.bib).find((b) => b.name === "container-title");
+  const venue = container && isObject(container.value) ? text(container.value.value) : undefined;
+  return { ...title ? { title } : {}, authors, ...year ? { year } : {}, ...venue ? { venue } : {} };
+}
+var meta3 = (name, value) => ({ name, class: "metadata", value });
+var location2 = (name, value) => ({ name, class: "location", value });
+function titlePages(view) {
+  const identity = isObject(view.loaded.manifest.data.identity) ? view.loaded.manifest.data.identity : {};
+  const named = Array.isArray(identity.title_pages) ? identity.title_pages.map(Number) : [];
+  const parts = named.length > 0 ? view.parts.filter((p) => named.includes(p.index)) : view.parts.filter((p) => p.streams.main !== "" || p.streams.furniture !== "").slice(0, 2);
+  return { indexes: parts.map((p) => p.index), text: foldName(parts.map((p) => `${p.streams.furniture}
+${p.streams.main}`).join(`
+`)) };
+}
+function againstCopy(record, view) {
+  const identity = isObject(view.loaded.manifest.data.identity) ? view.loaded.manifest.data.identity : {};
+  const pages = titlePages(view);
+  const statuses = new Map;
+  const evidence = [
+    location2("source_text", view.loaded.manifest.path),
+    ...typeof identity.basis === "string" ? [meta3("identity_basis", identity.basis)] : [],
+    meta3("title_page_parts", `index ${pages.indexes.join(", ")}`)
+  ];
+  const stated = {
+    title: text(identity.title),
+    authors: (Array.isArray(identity.contributors) ? identity.contributors : []).map(String),
+    year: /\d{4}/.exec(String(identity.issued ?? ""))?.[0],
+    venue: text(identity.venue)
+  };
+  const judge = (field, value, byIdentity, onPage, copySays) => {
+    const status = byIdentity === true || onPage ? "agrees" : byIdentity === false ? "differs" : "not_found";
+    statuses.set(field, status);
+    evidence.push(meta3(`${field}_in_record`, value));
+    if (status === "differs")
+      evidence.push({ name: `${field}_the_copy_states`, class: "source_text", value: copySays });
+    evidence.push(meta3(`${field}_result`, status === "agrees" ? [byIdentity === true ? "agrees with what the copy states" : "", onPage ? "found on the title page" : ""].filter(Boolean).join("; ") : status === "differs" ? "the copy states otherwise, and the title page text does not show the record's value" : "not found in what the copy states or in its title page text"));
+  };
+  if (record.title) {
+    judge("title", record.title, stated.title === undefined ? undefined : titlesMatch(record.title, stated.title), holds(pages.text, foldName(record.title)), stated.title);
+  }
+  if (record.authors.length > 0) {
+    const names = foldName(stated.authors.join(" "));
+    const byIdentity = stated.authors.length === 0 ? undefined : record.authors.every((a) => holds(names, foldName(a)));
+    judge("authors", record.authors.join("; "), byIdentity, record.authors.every((a) => holds(pages.text, foldName(a))), stated.authors.join("; "));
+  }
+  if (record.year)
+    judge("year", record.year, stated.year === undefined ? undefined : stated.year === record.year, holds(pages.text, record.year) || holds(pages.text, toRoman(Number(record.year))), stated.year);
+  if (record.venue) {
+    judge("venue", record.venue, stated.venue === undefined ? undefined : titlesMatch(record.venue, stated.venue), holds(pages.text, foldName(record.venue)), stated.venue);
+  }
+  return { statuses, evidence };
+}
+function describedSources(corpus, texts) {
+  const used = new Set([...resolveCitations(corpus).flatMap((r) => r.matches), ...listedSources(corpus)].map(idOf));
+  return active(corpus, "source").filter((s) => used.has(idOf(s)) || texts.idsOf(idOf(s)).length > 0);
+}
+function confirmation(corpus, source, fields) {
+  const binding = sourceBinding(source.data);
+  const found = active(corpus, "text_review").find((r) => {
+    const data = r.data;
+    const loaded = corpus.texts.get(String(data.text));
+    const covered = (Array.isArray(data.fields) ? data.fields : []).map(String);
+    return data.source === idOf(source) && data.scope === "source_details" && data.outcome === "agrees" && byPerson(data) && data.source_record_sha256 === binding && loaded !== undefined && currentReview(data, loaded) && fields.every((f) => covered.includes(f));
+  });
+  return found && idOf(found);
+}
+var confirmed = (result_, review) => review ? { ...result_, confirmed_by: review, open: false } : result_;
+var shared = (check, source) => ({
+  check,
+  subject: subjectOf(source),
+  source: idOf(source),
+  item: itemOf(source),
+  locus: check
+});
+var keyOf = (source) => meta3("key", String(source.data.citation_key ?? idOf(source)));
+function sourceMetaResults(corpus, texts = new SourceTexts(corpus)) {
+  const check = "meta.source";
+  return describedSources(corpus, texts).filter((s) => texts.idsOf(idOf(s)).length > 0).map((source) => {
+    const base = [location2("source_file", source.path), keyOf(source)];
+    const { views } = texts.of(idOf(source));
+    if (views.length === 0)
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: "source_damaged", evidence: base });
+    const record = describe(source.data);
+    const judged = views.map((v) => againstCopy(record, v)).sort((a, b) => score(a.statuses) - score(b.statuses))[0];
+    const evidence = [...base, ...judged.evidence];
+    const differing = [...judged.statuses].filter(([, s]) => s === "differs").map(([f]) => f);
+    if (differing.length > 0)
+      return result({ ...shared(check, source), outcome: "fail", reason: "mismatch", evidence });
+    if (!record.title)
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: "nothing_to_compare", evidence });
+    const missing = [...judged.statuses].filter(([, s]) => s === "not_found").map(([f]) => f);
+    if (missing.length === 0)
+      return result({ ...shared(check, source), outcome: "pass", evidence });
+    return confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason: "not_found_in_copy", evidence: [...evidence, meta3("not_found", missing.join(", "))] }), confirmation(corpus, source, missing));
+  });
+}
+var score = (statuses) => [...statuses.values()].reduce((n, s) => n + (s === "differs" ? 100 : s === "not_found" ? 1 : 0), 0);
+var lookupsOf = (corpus, source) => active(corpus, "resolution").filter((r) => r.data.source === source).sort((a, b) => String(b.data.queried_at).localeCompare(String(a.data.queried_at)) || (a.path < b.path ? -1 : 1));
+var identifierKey = (value) => isObject(value) ? `${String(value.scheme).toLowerCase()}:${String(value.value).toLowerCase()}` : "";
+var newest = (lookups) => {
+  const seen = new Map;
+  for (const l of lookups) {
+    const key = `${String(l.data.resolver)} ${identifierKey(l.data.identifier)}`;
+    if (!seen.has(key))
+      seen.set(key, l);
+  }
+  return [...seen.values()];
+};
+function resolverResults(corpus, texts = new SourceTexts(corpus)) {
+  const check = "meta.resolver";
+  return describedSources(corpus, texts).map((source) => {
+    const base = [location2("source_file", source.path), keyOf(source)];
+    const found = newest(lookupsOf(corpus, idOf(source))).filter((l) => l.data.outcome === "found" && isObject(l.data.found));
+    if (found.length === 0)
+      return result({ ...shared(check, source), outcome: "unverifiable", reason: "no_lookup", evidence: base });
+    const record = describe(source.data);
+    const compared = new Set;
+    const differing = new Set;
+    const evidence = [...base];
+    for (const lookup of found) {
+      const says = lookup.data.found;
+      const catalogue = {
+        title: text(says.title),
+        authors: (Array.isArray(says.contributors) ? says.contributors : []).map(String),
+        year: /\d{4}/.exec(String(says.issued ?? ""))?.[0],
+        venue: text(says.venue)
+      };
+      evidence.push(location2("lookup_file", lookup.path), meta3("looked_up", `${String(lookup.data.resolver)} on ${String(lookup.data.queried_at).slice(0, 10)}`));
+      const judge = (field, mine, theirs, same) => {
+        if (mine === undefined)
+          return;
+        if (theirs === "") {
+          evidence.push(meta3(`${field}_not_compared`, "this lookup does not state it"));
+          return;
+        }
+        compared.add(field);
+        if (!same()) {
+          differing.add(field);
+          evidence.push(meta3(`${field}_in_record`, mine), { name: `${field}_in_lookup`, class: "source_text", value: theirs });
+        }
+      };
+      judge("title", record.title, catalogue.title ?? "", () => titlesMatch(record.title, catalogue.title));
+      judge("authors", record.authors.length > 0 ? record.authors.join("; ") : undefined, catalogue.authors.join("; "), () => record.authors.every((a) => holds(foldName(catalogue.authors.join(" ")), foldName(a))));
+      judge("year", record.year, catalogue.year ?? "", () => record.year === catalogue.year);
+      judge("venue", record.venue, catalogue.venue ?? "", () => titlesMatch(record.venue, catalogue.venue));
+    }
+    if (differing.size > 0)
+      return result({ ...shared(check, source), outcome: "fail", reason: "mismatch", evidence });
+    evidence.push(meta3("compared", [...compared].join(", ") || "nothing"));
+    if (compared.has("title"))
+      return result({ ...shared(check, source), outcome: "pass", evidence });
+    return confirmed(result({ ...shared(check, source), outcome: "unverifiable", reason: "lookup_silent", evidence }), confirmation(corpus, source, ["title"]));
+  });
+}
+var identifiedSources = (corpus, texts) => describedSources(corpus, texts).filter((s) => list2(s.data.identifiers).length > 0);
+function identifierResults(corpus, texts = new SourceTexts(corpus)) {
+  const check = "id.resolves";
+  return identifiedSources(corpus, texts).flatMap((source) => list2(source.data.identifiers).map((identifier) => {
+    const name = `${String(identifier.scheme)}:${String(identifier.value)}`;
+    const base = [location2("source_file", source.path), keyOf(source), meta3("identifier", name)];
+    const parts = { ...shared(check, source), locus: name };
+    const lookup = lookupsOf(corpus, idOf(source)).find((l) => identifierKey(l.data.identifier) === identifierKey(identifier));
+    if (!lookup || isRetired(lookup.data))
+      return result({ ...parts, outcome: "unverifiable", reason: "no_lookup", evidence: base });
+    const evidence = [...base, location2("lookup_file", lookup.path), meta3("looked_up", `${String(lookup.data.resolver)} on ${String(lookup.data.queried_at).slice(0, 10)}`)];
+    if (lookup.data.outcome === "not_found")
+      return result({ ...parts, outcome: "fail", reason: "not_found", evidence });
+    if (lookup.data.outcome !== "found")
+      return result({ ...parts, outcome: "unverifiable", reason: "lookup_error", evidence });
+    const theirs = isObject(lookup.data.found) ? text(lookup.data.found.title) : undefined;
+    const mine = describe(source.data).title;
+    if (!theirs || !mine)
+      return result({ ...parts, outcome: "unverifiable", reason: "lookup_silent", evidence });
+    if (titlesMatch(mine, theirs))
+      return result({ ...parts, outcome: "pass", evidence });
+    return result({ ...parts, outcome: "fail", reason: "other_work", evidence: [...evidence, meta3("title_in_record", mine), { name: "title_in_lookup", class: "source_text", value: theirs }] });
+  }));
+}
+
+// packages/core/src/checks/numbers.ts
+var FIGURE = /(?<![\p{L}\p{N}.,])\d+(?:[.,]\d+)*(?:\s?%)?/gu;
+function figuresIn(sentence, quotation, locator) {
+  let text = sentence.replace(/\u201C[^\u201D]*\u201D|"[^"]*"/g, " ");
+  if (quotation)
+    text = text.split(quotation).join(" ");
+  if (locator)
+    text = text.replace(new RegExp(`\\b(?:pp?\\.|pages?|chapters?|ch\\.|paragraphs?)\\s*${locator.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`, "gi"), " ");
+  const found = [...text.matchAll(FIGURE)].flatMap((m) => {
+    const after = text.slice(m.index + m[0].length);
+    const figure = m[0].replace(/\s/g, "");
+    if (/^(st|nd|rd|th)\b/i.test(after) || /^(1[5-9]|20)\d\d$/.test(figure))
+      return [];
+    if (/^\s?(January|February|March|April|May|June|July|August|September|October|November|December)\b/.test(after))
+      return [];
+    return [figure];
+  });
+  return [...new Set(found)];
+}
+var present = (text, figure) => {
+  const bare = figure.replace(/%$/, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const percent = figure.endsWith("%") ? "\\s?(?:%|per\\s?cent)" : "";
+  return new RegExp(`(?<![\\d]|\\d[.,])${bare}(?![\\d]|[.,]\\d)${percent}`, "iu").test(text);
+};
+var figureCitations = (corpus) => (hasManuscript(corpus) ? [] : resolveCitations(corpus)).flatMap((r) => {
+  const data = r.citation.data;
+  const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" ? data.sentence.text : undefined;
+  const figures = sentence ? figuresIn(sentence, typeof data.quotation === "string" ? data.quotation : undefined, isObject(data.locator) ? String(data.locator.value) : undefined) : [];
+  return figures.length > 0 ? [{ ...r, figures, sentence: data.sentence }] : [];
+});
+function numberResults(corpus, texts = new SourceTexts(corpus)) {
+  const all = hasManuscript(corpus) ? [] : resolveCitations(corpus);
+  return figureCitations(corpus).flatMap(({ citation, key, matches, figures, sentence }) => {
+    if (matches.length !== 1)
+      return [];
+    const source = idOf(matches[0]);
+    const several = all.filter((r) => isObject(r.citation.data.sentence) && r.citation.data.sentence.sha256 === sentence.sha256).length > 1;
+    const { views, unusable } = texts.of(source);
+    const missing = figures.filter((f) => !views.some((v) => present(v.streams.main.text, f) || present(v.streams.notes.text, f)));
+    const outcome = several || views.length === 0 || missing.length > 0 && unusable > 0 ? "unverifiable" : missing.length > 0 ? "fail" : "pass";
+    const reason = several ? "several_citations" : outcome === "unverifiable" ? "text_unavailable" : outcome === "fail" ? "figure_absent" : undefined;
+    const evidence = [
+      { name: "citation_file", class: "location", value: citation.path },
+      { name: "key", class: "metadata", value: key ?? String(matches[0].data.citation_key ?? source) },
+      { name: "figures", class: "manuscript", value: figures.join(", ") },
+      ...outcome === "fail" ? [{ name: "not_found", class: "manuscript", value: missing.join(", ") }] : [],
+      ...views.map((v) => ({ name: "source_text", class: "location", value: v.loaded.manifest.path }))
+    ];
+    return [result({ check: "number.present", outcome, ...reason ? { reason } : {}, subject: subjectOf(citation), locus: `${idOf(citation)}#figures`, source, evidence, item: itemOf(citation), sentence })];
+  });
+}
+
+// packages/core/src/checks/structure.ts
+var at2 = (name, value) => ({ name, class: "location", value });
+var meta4 = (name, value) => ({ name, class: "metadata", value });
+var activeTexts = (corpus) => [...corpus.texts].filter(([, t]) => !isRetired(t.manifest.data));
+var common = (check, text) => ({
+  check,
+  subject: subjectOf(text.manifest),
+  source: String(text.manifest.data.source),
+  item: itemOf(text.manifest)
+});
+function pageResults(corpus) {
+  const check = "source.pages";
+  return activeTexts(corpus).flatMap(([id, text]) => {
+    const parts = meta4("parts", `${text.parts.length} ${text.manifest.data.paged === true ? "page files" : "section files"} present`);
+    if (text.damage.length > 0) {
+      return text.damage.map((d) => result({
+        ...common(check, text),
+        outcome: "fail",
+        reason: d.code,
+        locus: `${id}#${d.code}#${d.path}#${d.detail ?? ""}`,
+        evidence: [at2("file", d.path), ...d.detail ? [meta4("detail", d.detail)] : []]
+      }));
+    }
+    if (!text.usable) {
+      return [result({ ...common(check, text), outcome: "unverifiable", reason: "part_invalid", locus: id, evidence: [at2("source_text", text.manifest.path)] })];
+    }
+    return [result({ ...common(check, text), outcome: "pass", locus: id, evidence: [at2("source_text", text.manifest.path), parts] })];
+  });
+}
+var bare = (value) => value.trim().replace(/^[[(\u2014\u2013\s.-]+|[\])\u2014\u2013\s.-]+$/g, "");
+function labelResults(corpus) {
+  const check = "source.labels";
+  return activeTexts(corpus).flatMap(([id, text]) => {
+    if (text.manifest.data.paged !== true || !text.parts.some((p) => p.front.label !== undefined))
+      return [];
+    const found = [];
+    const last = new Map;
+    for (const part of text.parts) {
+      const label = typeof part.front.label === "string" ? part.front.label : undefined;
+      if (label === undefined)
+        continue;
+      for (const folio of part.blocks.filter((b) => b.role === "folio")) {
+        if (bare(blockText(folio)) !== label) {
+          found.push({ reason: "folio_differs", locus: `${part.index}#folio`, evidence: [at2("file", part.path), meta4("label", label), { name: "folio", class: "source_text", value: blockText(folio) }] });
+        }
+      }
+      const number = numberOf(label);
+      if (!number)
+        continue;
+      const before = last.get(number.style);
+      last.set(number.style, { value: number.value, index: part.index, label });
+      if (!before)
+        continue;
+      const [step, pages] = [number.value - before.value, part.index - before.index];
+      const reason = step === 0 ? "label_repeated" : step < 0 ? "label_backwards" : step > pages ? "label_jump" : undefined;
+      if (reason) {
+        found.push({ reason, locus: `${part.index}#${reason}`, evidence: [at2("file", part.path), meta4("labels", `page index ${before.index} is labelled ${before.label}; page index ${part.index} is labelled ${label}`)] });
+      }
+    }
+    if (found.length === 0) {
+      const labelled = text.parts.filter((p) => p.front.label !== undefined).length;
+      return [result({ ...common(check, text), outcome: "pass", locus: id, evidence: [at2("source_text", text.manifest.path), meta4("labelled", `${labelled} of ${text.parts.length} pages have a printed label`)] })];
+    }
+    return found.map((f) => result({ ...common(check, text), outcome: "fail", reason: f.reason, locus: `${id}#${f.locus}`, evidence: f.evidence }));
+  });
+}
+function footnoteResults(corpus) {
+  const check = "source.footnotes";
+  return activeTexts(corpus).flatMap(([id, text]) => {
+    const groups = text.manifest.data.paged === true ? text.parts.map((p) => ({ name: `index ${p.index}`, path: p.path, ...noteMarks(p.blocks) })) : [{ name: "the text", path: text.manifest.path, ...noteMarks(text.parts.flatMap((p) => p.blocks)) }];
+    if (!groups.some((g) => g.markers.length > 0 || g.notes.length > 0))
+      return [];
+    const found = groups.flatMap((group) => {
+      const notes = group.notes.map((n) => ({ ...n, used: false }));
+      const out = [];
+      for (const label of group.markers) {
+        const note = notes.find((n) => !n.used && n.label === label);
+        if (note)
+          note.used = true;
+        else
+          out.push({ reason: "marker_without_note", label, name: group.name, path: group.path });
+      }
+      for (const note of notes.filter((n) => !n.used && !n.continued))
+        out.push({ reason: "note_without_marker", label: note.label, name: group.name, path: group.path });
+      return out;
+    });
+    if (found.length === 0) {
+      const count = groups.reduce((n, g) => n + g.notes.length, 0);
+      return [result({ ...common(check, text), outcome: "pass", locus: id, evidence: [at2("source_text", text.manifest.path), meta4("notes", `${count} note(s), each paired or marked as continued`)] })];
+    }
+    return found.map((f, i) => result({
+      ...common(check, text),
+      outcome: "fail",
+      reason: f.reason,
+      locus: `${id}#${f.name}#${f.reason}#${f.label}#${i}`,
+      evidence: [at2("file", f.path), meta4("where", f.name), meta4("note_label", f.label || "(none)")]
+    }));
+  });
+}
+
+// packages/core/src/checks/original.ts
+var at3 = (name, value) => ({ name, class: "location", value });
+var meta5 = (name, value) => ({ name, class: "metadata", value });
+function originalResults(corpus, tools) {
+  const check = "source.original";
+  return activeTexts(corpus).flatMap(([id, text]) => {
+    const data = text.manifest.data;
+    const upstreams = active(corpus, "upstream").filter((u) => u.data.source === data.source);
+    const runs = reconversions(corpus, id);
+    if (upstreams.length === 0 && runs.length === 0)
+      return [];
+    const files = isObject(data.original) && Array.isArray(data.original.files) ? data.original.files.filter(isObject) : [];
+    const shared = {
       check,
-      outcome: held.outcome,
-      reason: held.reason,
-      subject: subjectOf(file),
-      locus: "stored_copy",
+      subject: subjectOf(text.manifest),
+      source: String(data.source),
+      item: itemOf(text.manifest)
+    };
+    const evidence = [at3("source_text", text.manifest.path), ...files.map((f) => meta5("original_sha256", String(f.sha256)))];
+    if (upstreams.length > 0 && !upstreams.some((u) => files.some((f) => f.sha256 === u.data.sha256))) {
+      return [result({ ...shared, outcome: "fail", reason: "original_not_upstream", locus: `${id}#upstream`, evidence: [...evidence, ...upstreams.map((u) => at3("upstream_file", u.path))] })];
+    }
+    const upstreamWords = upstreams.length > 0 ? [meta5("upstream", "the original's digest matches an upstream record")] : [];
+    if (runs.length === 0) {
+      return [result({ ...shared, outcome: "pass", locus: id, evidence: [...evidence, ...upstreamWords, meta5("fresh_conversion", "none recorded: this says nothing about the text against the original")] })];
+    }
+    const run = runs.find((r) => currentRun(r.data, text, tools));
+    if (!run) {
+      return [result({ ...shared, outcome: "unverifiable", reason: "comparison_stale", locus: id, evidence: [...evidence, at3("comparison_file", runs[0].path)] })];
+    }
+    const pages = (Array.isArray(run.data.pages) ? run.data.pages : []).filter(isObject);
+    const differing = pages.filter((p) => Number(p.differing_words) > 0);
+    if (differing.length > 0) {
+      const shown = differing.slice(0, 5).flatMap((p) => (Array.isArray(p.differences) ? p.differences : []).filter(isObject).slice(0, 2).flatMap((d) => [
+        { name: `committed_reading_at_index_${String(p.index)}`, class: "source_text", value: String(d.reading) },
+        { name: `fresh_reading_at_index_${String(p.index)}`, class: "source_text", value: String(d.other) }
+      ]));
+      return [result({
+        ...shared,
+        outcome: "fail",
+        reason: "conversion_differs",
+        locus: `${id}#conversion`,
+        evidence: [...evidence, at3("comparison_file", run.path), meta5("differing", `${differing.length} of ${pages.length} parts differ, at index ${differing.slice(0, 20).map((p) => String(p.index)).join(", ")}`), ...shown]
+      })];
+    }
+    return [result({ ...shared, outcome: "pass", locus: id, evidence: [...evidence, ...upstreamWords, at3("comparison_file", run.path), meta5("fresh_conversion", `all ${pages.length} parts agree with a fresh conversion of the original`)] })];
+  });
+}
+
+// packages/core/src/checks/quotes.ts
+var CHECK = "quote.present";
+var at4 = (name, value) => ({ name, class: "location", value });
+var meta6 = (name, value) => ({ name, class: "metadata", value });
+var sourceText = (name, value) => ({ name, class: "source_text", value });
+function place(search, start, end) {
+  const { view, stream } = search;
+  const indexes = view.partsOf(stream, start, end);
+  return [
+    at4("source_text", view.loaded.manifest.path),
+    at4("found_on", `${indexes.map((i) => placeOf(view, i)).join("; ")}${stream === "notes" ? ", in a note" : ""}`),
+    at4("address", addressText(view.id, view.address(stream, start, end))),
+    meta6("text_method", `${view.method}, quality ${view.level}`)
+  ];
+}
+function compareQuotation(quotation, searches, skipped) {
+  const profile = meta6("profile", QUOTE_PROFILE);
+  let found;
+  for (const search of searches) {
+    const match = findQuotation(search.view.folded(search.stream), quotation, search.within);
+    if (match && (!found || found.match.match === "normalized" && match.match === "exact"))
+      found = { search, match };
+  }
+  if (found) {
+    const { search, match } = found;
+    return {
+      outcome: "pass",
+      evidence: [
+        meta6("match", match.match),
+        profile,
+        ...match.folds.length > 0 ? [meta6("differences_allowed", match.folds.map((f) => FOLD_WORDS[f]).join("; "))] : [],
+        ...match.joined.map((word) => sourceText("joined_at_line_end", word)),
+        ...match.match === "normalized" ? [sourceText("source_passage", search.view.streams[search.stream].text.slice(match.start, match.end))] : [],
+        ...place(search, match.start, match.end)
+      ]
+    };
+  }
+  if (searches.length === 0)
+    return { outcome: "unverifiable", reason: "text_unavailable", evidence: [profile] };
+  let closest;
+  for (const search of searches) {
+    const span = findClosest(search.view.folded(search.stream), quotation, search.within);
+    if (span && (!closest || span.distance < closest.span.distance))
+      closest = { search, span };
+  }
+  const shown = closest ? [
+    sourceText("source_passage", closest.search.view.streams[closest.search.stream].text.slice(closest.span.start, closest.span.end)),
+    ...place(closest.search, closest.span.start, closest.span.end)
+  ] : [meta6("closest", "no passage of the source text is close enough to show")];
+  const evidence = [
+    meta6("match", closest?.span.near ? "near" : "none"),
+    profile,
+    ...shown,
+    ...skipped > 0 ? [meta6("not_searched", `${skipped} other source file(s) of this source could not be used`)] : []
+  ];
+  if (searches.every((s) => s.view.level === "poor"))
+    return { outcome: "unverifiable", reason: "poor_quality", evidence };
+  if (closest?.span.near)
+    return { outcome: "fail", reason: "near_match", evidence };
+  if (skipped > 0)
+    return { outcome: "unverifiable", reason: "text_unavailable", evidence };
+  return { outcome: "fail", reason: "absent", evidence };
+}
+var searchesOf = (views) => views.flatMap((view) => ["main", "notes"].filter((s) => view.streams[s].text !== "").map((stream) => ({ view, stream })));
+function passageVerdict(texts, passage) {
+  const quote = isObject(passage.quote) && typeof passage.quote.exact === "string" ? passage.quote.exact : "";
+  const now = textAt(texts, passage);
+  if (now.state === "unavailable")
+    return { outcome: "unverifiable", reason: "text_unavailable", evidence: [meta6("profile", QUOTE_PROFILE)] };
+  if (now.state === "changed") {
+    return { outcome: "fail", reason: "passage_differs", evidence: [meta6("problem", `the page or section at index ${now.index} changed after the passage was captured`)] };
+  }
+  if (now.text !== quote) {
+    return {
+      outcome: "fail",
+      reason: "passage_differs",
+      evidence: [meta6("problem", "the words recorded are not the words at the passage's address"), sourceText("source_passage", now.text)]
+    };
+  }
+  return {
+    outcome: "pass",
+    evidence: [
+      meta6("match", "exact"),
+      meta6("profile", QUOTE_PROFILE),
+      at4("source_text", now.view.loaded.manifest.path),
+      at4("found_on", now.indexes.map((i) => placeOf(now.view, i)).join("; ")),
+      meta6("text_method", `${now.view.method}, quality ${now.view.level}`)
+    ]
+  };
+}
+function departures(corpus, citation) {
+  if (citation.passage === undefined)
+    return;
+  const passage = corpus.byId.get(String(citation.passage))?.data;
+  if (passage?.kind !== "passage" || !isObject(passage.quote))
+    return;
+  const expected = renderQuotation(String(passage.quote.exact));
+  const out = [];
+  if (citation.quotation !== expected)
+    out.push(sourceText("passage_quotation", expected));
+  if (citation.locator === undefined || canonical(citation.locator) !== canonical(passage.locator)) {
+    out.push(meta6("passage_locator", isObject(passage.locator) ? `${String(passage.locator.label)} ${String(passage.locator.value)}` : "none"));
+  }
+  return out.length > 0 ? out : undefined;
+}
+function usedPassages(corpus) {
+  const used = new Set;
+  for (const note of active(corpus, "note"))
+    for (const id of [note.data.passages].flat())
+      used.add(String(id));
+  for (const link of active(corpus, "attestation"))
+    used.add(String(link.data.evidence));
+  for (const record of active(corpus, "support_record"))
+    used.add(String(record.data.passage));
+  for (const record of active(corpus, "citation"))
+    used.add(String(record.data.passage));
+  return active(corpus, "passage").filter((p) => used.has(idOf(p)));
+}
+var quotationCitations = (corpus) => hasManuscript(corpus) ? [] : resolveCitations(corpus).filter(({ citation }) => typeof citation.data.quotation === "string");
+var sentenceOf = (data) => isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
+function quoteResults(corpus, texts = new SourceTexts(corpus)) {
+  const results = [];
+  for (const { citation, key, matches } of quotationCitations(corpus)) {
+    if (matches.length !== 1)
+      continue;
+    const source = idOf(matches[0]);
+    const data = citation.data;
+    const quotation = data.quotation;
+    const { views, unusable } = texts.of(source);
+    const departed = departures(corpus, data);
+    const verdict = departed ? { outcome: "fail", reason: "citation_differs", evidence: departed } : compareQuotation(quotation, searchesOf(views), unusable);
+    const sentence = sentenceOf(data);
+    results.push(result({
+      check: CHECK,
+      outcome: verdict.outcome,
+      ..."reason" in verdict ? { reason: verdict.reason } : {},
+      subject: subjectOf(citation),
+      locus: `${idOf(citation) ?? citation.path}#quotation`,
       source,
-      evidence: [at2("source_file", file.path), meta3("key", String(file.data.citation_key ?? source)), ...held.evidence],
-      item: itemOf(file)
+      evidence: [
+        at4("citation_file", citation.path),
+        meta6("key", key ?? String(matches[0].data.citation_key ?? source)),
+        { name: "cited_text", class: "manuscript", value: quotation },
+        ...verdict.evidence
+      ],
+      item: itemOf(citation),
+      ...sentence ? { sentence } : {}
     }));
   }
+  const record = (file, verdict, cited, locus) => {
+    results.push(result({
+      check: CHECK,
+      outcome: verdict.outcome,
+      ..."reason" in verdict ? { reason: verdict.reason } : {},
+      subject: subjectOf(file),
+      locus: `${idOf(file) ?? file.path}#${locus}`,
+      source: String(file.data.source),
+      evidence: [at4("record_file", file.path), sourceText("cited_text", cited), ...verdict.evidence],
+      item: itemOf(file)
+    }));
+  };
+  for (const passage of usedPassages(corpus)) {
+    record(passage, passageVerdict(texts, passage.data), isObject(passage.data.quote) ? String(passage.data.quote.exact) : "", "passage");
+  }
+  for (const note of active(corpus, "note").filter((n) => n.data.type === "extract")) {
+    const body = String(note.data.body);
+    const searches = [note.data.passages ?? []].flat().flatMap((id) => {
+      const passage = corpus.byId.get(String(id))?.data;
+      const now = passage?.kind === "passage" ? textAt(texts, passage) : undefined;
+      if (now?.state !== "ok")
+        return [];
+      const found = findQuotation(now.view.folded(now.stream), now.text);
+      return found ? [{ view: now.view, stream: now.stream, within: (s) => s.start >= found.start && s.end <= found.end }] : [];
+    });
+    record(note, searches.length === 0 ? { outcome: "unverifiable", reason: "anchor_not_found", evidence: [meta6("profile", QUOTE_PROFILE)] } : compareQuotation(body, searches, 0), body, "extract");
+  }
   return results;
+}
+function occurrences(views, quotation, most = 50) {
+  const out = [];
+  for (const { view, stream } of searchesOf(views)) {
+    let after = -1;
+    while (out.length < most) {
+      let found = findQuotation(view.folded(stream), quotation, (s) => s.start > after);
+      if (!found)
+        break;
+      for (let earlier;earlier = findQuotation(view.folded(stream), quotation, (s) => s.start > after && s.start < found.start); )
+        found = earlier;
+      after = found.start;
+      out.push({ view, stream, start: found.start, end: found.end });
+    }
+  }
+  return out;
+}
+var sameNumber = (a, b) => {
+  const [x, y] = [numberOf(a.toUpperCase()) ?? numberOf(a.toLowerCase()), numberOf(b.toUpperCase()) ?? numberOf(b.toLowerCase())];
+  return x && y ? x.value === y.value : a.toLowerCase() === b.toLowerCase();
+};
+function whereIs(o, term, cited) {
+  const parts = o.view.partsOf(o.stream, o.start, o.end).map((i) => o.view.part(i));
+  const among = (found, same) => {
+    const inside = found.filter((f) => cited.some((c) => same(c, f))).length;
+    return inside === found.length ? "covered" : inside > 0 ? "partly" : "elsewhere";
+  };
+  if (term === "page" || term === "folio") {
+    if (!o.view.paged || parts.some((p) => p.label === undefined))
+      return "unknown";
+    return among(parts.map((p) => p.label), (a, b) => a === b);
+  }
+  if (term === "chapter") {
+    return parts.some((p) => p.chapter === undefined) ? "unknown" : among(parts.map((p) => p.chapter), sameNumber);
+  }
+  if (term === "paragraph" && o.stream === "main" && !o.view.paged) {
+    const numbers = parts.flatMap((p) => {
+      const span = o.view.streams.main.spans.find((s) => s.index === p.index);
+      return paragraphNumbers(p, o.start - span.start, o.end - span.start).map(String);
+    });
+    return numbers.length === 0 ? "unknown" : among(numbers, (a, b) => a === b);
+  }
+  return "unknown";
+}
+function citedLabels(locator) {
+  const term = String(locator.label);
+  if (term === "page" || term === "folio")
+    return citedPages(locator);
+  if (term !== "chapter" && term !== "paragraph")
+    return;
+  return locatorParts(String(locator.value), locator.end).flatMap((p) => {
+    const [a, b] = [Number(p.first), Number(p.last)];
+    return p.first !== p.last && Number.isInteger(a) && Number.isInteger(b) && b >= a && b - a < 100 ? Array.from({ length: b - a + 1 }, (_, i) => String(a + i)) : [p.first, ...p.last === p.first ? [] : [p.last]];
+  });
+}
+var pageQuotations = (corpus) => quotationCitations(corpus).filter(({ citation }) => isObject(citation.data.locator) && ["page", "folio", "chapter", "paragraph"].includes(String(citation.data.locator.label)));
+function quotePageResults(corpus, texts = new SourceTexts(corpus)) {
+  return pageQuotations(corpus).flatMap(({ citation, key, matches }) => {
+    if (matches.length !== 1)
+      return [];
+    const source = idOf(matches[0]);
+    const data = citation.data;
+    const locator = data.locator;
+    const cited = citedLabels(locator);
+    const found = occurrences(texts.of(source).views, data.quotation);
+    if (!cited || found.length === 0)
+      return [];
+    const judged = found.map((o) => ({ o, where: whereIs(o, String(locator.label), cited) }));
+    const best = ["covered", "partly", "elsewhere", "unknown"].find((w) => judged.some((j) => j.where === w));
+    const shown = judged.filter((j) => j.where === best).slice(0, 5);
+    const sentence = sentenceOf(data);
+    const outcome = best === "covered" ? "pass" : best === "unknown" ? "unverifiable" : "fail";
+    const reason = best === "partly" ? "partly_on_page" : best === "elsewhere" ? "wrong_page" : best === "unknown" ? "place_unknown" : undefined;
+    return [result({
+      check: "quote.page",
+      outcome,
+      ...reason ? { reason } : {},
+      subject: subjectOf(citation),
+      locus: `${idOf(citation) ?? citation.path}#page`,
+      source,
+      evidence: [
+        at4("citation_file", citation.path),
+        meta6("key", key ?? String(matches[0].data.citation_key ?? source)),
+        { name: "locator", class: "manuscript", value: `${String(locator.label)} ${String(locator.value)}` },
+        ...shown.flatMap((j) => place(j.o, j.o.start, j.o.end).slice(0, 3))
+      ],
+      item: itemOf(citation),
+      ...sentence ? { sentence } : {}
+    })];
+  });
 }
 
 // packages/core/src/run.ts
 function recordResults(corpus) {
-  return [corpus.settings, ...corpus.records].flatMap(fileResults).concat(rulesResults(corpus));
+  return [corpus.settings, ...corpus.records, ...corpus.partFiles].flatMap(fileResults).concat(rulesResults(corpus));
 }
 function guarded(check, corpus, run, errors) {
   try {
@@ -108366,18 +109413,27 @@ function label(results, skipped) {
 }
 var IMPLEMENTED_CHECKS = {
   "record.valid": recordResults,
+  "source.held": (c, x) => heldResults(c, x.texts),
+  "source.pages": pageResults,
+  "source.labels": labelResults,
+  "source.footnotes": footnoteResults,
+  "source.original": (c, x) => originalResults(c, x.tools),
+  "source.changed": changedResults,
   "cite.key": citeKeyResults,
   "bib.uncited": uncitedResults,
-  "source.held": heldResults,
-  "source.changed": changedResults,
-  "quote.present": quoteResults,
-  "locator.extent": locatorResults,
+  "quote.present": (c, x) => quoteResults(c, x.texts),
+  "quote.page": (c, x) => quotePageResults(c, x.texts),
+  "locator.extent": (c, x) => locatorResults(c, x.texts),
+  "meta.source": (c, x) => sourceMetaResults(c, x.texts),
+  "meta.resolver": (c, x) => resolverResults(c, x.texts),
+  "id.resolves": (c, x) => identifierResults(c, x.texts),
+  "number.present": (c, x) => numberResults(c, x.texts),
   "coordinate.stray": coordinateResults
 };
-function runChecks(corpus, tools, blobs = NO_STORE) {
+function runChecks(corpus, tools) {
   const errors = [];
-  const read = new Set;
-  const results = sortResults(Object.entries(IMPLEMENTED_CHECKS).flatMap(([check, run]) => guarded(check, corpus, (c) => run(c, blobs, read), errors)));
+  const context = { texts: new SourceTexts(corpus), tools };
+  const results = sortResults(Object.entries(IMPLEMENTED_CHECKS).flatMap(([check, run]) => guarded(check, corpus, (c) => run(c, context), errors)));
   const skipped = notRun(corpus);
   const unreviewed = unreviewedItems(corpus);
   const count = (test) => results.filter(test).length;
@@ -108387,7 +109443,7 @@ function runChecks(corpus, tools, blobs = NO_STORE) {
     unverifiable: count((r) => r.outcome === "unverifiable"),
     open: count((r) => r.open),
     dismissed: 0,
-    confirmed: 0,
+    confirmed: count((r) => r.confirmed_by !== undefined),
     unreviewed: unreviewed.length,
     could_not_check: count((r) => r.outcome === "unverifiable"),
     not_implemented: skipped.filter((n) => n.reason === "not_implemented").length
@@ -108399,12 +109455,13 @@ function runChecks(corpus, tools, blobs = NO_STORE) {
     inputs: {
       corpus_sha256: corpusDigest(corpus),
       manuscript: corpus.manuscript.map((f) => ({ path: f.path, sha256: f.bytes ? sha256(f.bytes) : "unreadable" })).sort((a, b) => compareCodePoints(a.path, b.path)),
-      blobs: [...read].sort(),
+      research: corpus.research.map((f) => ({ path: f.path, sha256: f.bytes ? sha256(f.bytes) : "unreadable" })).sort((a, b) => compareCodePoints(a.path, b.path)),
       profiles: results.some((r) => r.check === "quote.present") ? [QUOTE_PROFILE] : []
     },
     tools,
     results,
     not_run: skipped,
+    verification: activeTexts(corpus).map(([, text]) => coverageOf(corpus, text, tools)),
     unreviewed,
     redaction: "none",
     label: label(results, skipped),
@@ -108412,14 +109469,24 @@ function runChecks(corpus, tools, blobs = NO_STORE) {
   };
   return { body, errors };
 }
+
 // packages/core/src/operations.ts
 class InvalidInput extends Error {
 }
 
 class ActorNeeded extends Error {
 }
+var MADE_BY_COMMAND = {
+  source_text: "source convert",
+  passage: "passage capture",
+  comparison_run: "source verify or source compare",
+  text_review: "review add",
+  resolution: "resolve"
+};
 function prepareRecord(request) {
   const { kind } = request;
+  if (MADE_BY_COMMAND[kind])
+    throw new InvalidInput(`A ${kind} record is made by \`${MADE_BY_COMMAND[kind]}\`, which copies or computes what it holds.`);
   let parsed;
   try {
     parsed = parseJson(request.input);
@@ -108448,6 +109515,11 @@ function prepareRecord(request) {
       throw new ActorNeeded;
     record.created = { at: request.now.toISOString().replace(/\.\d+Z$/, "Z"), by: { ...request.actor } };
   }
+  if (kind === "citation" && record.passage !== undefined) {
+    if (!request.corpus)
+      throw new InvalidInput("A citation made from a passage needs the project to copy from.");
+    citationFromPassage(request.corpus, record);
+  }
   if (kind === "source")
     record.admission ??= "candidate";
   if (kind === "source" || kind === "citation")
@@ -108460,38 +109532,612 @@ function prepareRecord(request) {
   return { id, path: recordPath(kind, id), text: canonical(record) };
 }
 function formatPlan(corpus, wanted) {
-  return [corpus.settings, ...corpus.records].flatMap((file) => {
+  const parts = corpus.partFiles.flatMap((file) => {
+    if (!wanted.has(file.path) || file.state !== "ok" || !file.formattable || !file.bytes)
+      return [];
+    const before = new TextDecoder("utf-8", { ignoreBOM: true }).decode(file.bytes);
+    const split = splitFrontMatter(before);
+    if ("problem" in split)
+      return [];
+    const text = serializePart(split.front, parseBlocks(split.body).blocks);
+    return text === before ? [] : [{ path: file.path, text }];
+  });
+  return parts.concat([corpus.settings, ...corpus.records].flatMap((file) => {
     if (!wanted.has(file.path) || file.state !== "ok" || !file.formattable || !file.data)
       return [];
-    const text = canonical(file.data);
-    return new TextDecoder("utf-8", { ignoreBOM: true }).decode(file.bytes) === text ? [] : [{ path: file.path, text }];
-  });
+    const before = new TextDecoder("utf-8", { ignoreBOM: true }).decode(file.bytes);
+    const split = file.path.startsWith("sources/") ? splitFrontMatter(before) : undefined;
+    const text = split && !("problem" in split) ? serializeManifest(file.data, split.body) : canonical(file.data);
+    return before === text ? [] : [{ path: file.path, text }];
+  }));
 }
 var fileOf = (result) => result.evidence.find((e) => e.name === "file")?.value ?? result.subject;
 function validateFiles(corpus, wanted) {
   return recordResults(corpus).filter((r) => wanted.has(fileOf(r)));
 }
-// packages/core/src/sources.ts
+
+// packages/core/src/passages.ts
+var addressText = (text, anchor) => `${text}/${anchor.map((a) => `${a.index}:${a.stream}:${a.start}-${a.end}`).join("+")}`;
+function parseAddress(address) {
+  const slash = address.indexOf("/");
+  const text = address.slice(0, slash);
+  const pieces = address.slice(slash + 1).split("+").map((p) => /^(\d+):(main|notes):(\d*)-(\d*)$/.exec(p));
+  const bad = () => new InvalidInput("An address looks like txt-\u2026/105:main:120-240, or txt-\u2026/105:main:900-+106:main:-80 across pages.");
+  if (slash < 0 || pieces.some((p) => !p))
+    throw bad();
+  const [first, last] = [pieces[0], pieces.at(-1)];
+  if (first[3] === "" || pieces.some((p) => p[2] !== first[2]))
+    throw bad();
+  return {
+    text,
+    stream: first[2],
+    from: { index: Number(first[1]), offset: Number(first[3]) },
+    to: { index: Number(last[1]), ...last[4] === "" ? {} : { offset: Number(last[4]) } }
+  };
+}
+function resolveSpan(view, address) {
+  const place = (index, offset) => {
+    const span = view.streams[address.stream].spans.find((s) => s.index === index);
+    const part = view.part(index);
+    if (!span || !part)
+      throw new InvalidInput(`The source file has no ${address.stream} text at index ${index}.`);
+    const text = part.streams[address.stream];
+    if (offset !== undefined && offset > codePoints(text))
+      throw new InvalidInput(`Index ${index} has fewer than ${offset} characters.`);
+    return span.start + (offset === undefined ? text.length : unitAt(text, offset));
+  };
+  const start = place(address.from.index, address.from.offset);
+  const end = place(address.to.index, address.to.offset);
+  if (end <= start)
+    throw new InvalidInput("The address ends before it starts.");
+  return { start, end };
+}
+var rangeOf = (labels) => labels.length === 1 ? labels[0] : `${labels[0]}-${labels.at(-1)}`;
+function locatorOf(view, stream, start, end) {
+  const indexes = view.partsOf(stream, start, end);
+  const parts = indexes.map((i) => view.part(i));
+  if (parts.length === 0)
+    return;
+  if (view.paged) {
+    return parts.every((p) => p.label !== undefined) ? { label: "page", value: rangeOf(parts.map((p) => p.label)) } : undefined;
+  }
+  const chapter = parts[0].chapter;
+  if (parts.some((p) => p.chapter !== chapter))
+    return;
+  if (stream === "main") {
+    const numbers = parts.flatMap((p) => {
+      const span = view.streams.main.spans.find((s) => s.index === p.index);
+      return paragraphNumbers(p, start - span.start, end - span.start);
+    });
+    if (!chapter && numbers.length > 0)
+      return { label: "paragraph", value: rangeOf([...new Set(numbers.map(String))]) };
+  }
+  return chapter && (numberOf(chapter) || /^[a-z]+$/i.test(chapter)) ? { label: "chapter", value: chapter } : undefined;
+}
+function findPassages(corpus, source, words, most = 20) {
+  const texts = new SourceTexts(corpus);
+  const out = [];
+  for (const view of texts.of(source).views) {
+    for (const stream of ["main", "notes"]) {
+      let after = -1;
+      while (out.length < most) {
+        const found = findQuotation(view.folded(stream), words, (s) => s.start > after);
+        if (!found)
+          break;
+        let first = found;
+        for (let earlier;earlier = findQuotation(view.folded(stream), words, (s) => s.start > after && s.start < first.start); )
+          first = earlier;
+        after = first.start;
+        const exact = view.streams[stream].text.slice(first.start, first.end);
+        const locator = locatorOf(view, stream, first.start, first.end);
+        out.push({
+          text: view.id,
+          address: addressText(view.id, view.address(stream, first.start, first.end)),
+          match: first.match,
+          places: view.partsOf(stream, first.start, first.end).map((i) => placeOf(view, i)),
+          ...locator ? { locator } : {},
+          exact,
+          quotation: renderQuotation(exact)
+        });
+      }
+    }
+  }
+  return out;
+}
+function capturePassage(corpus, request) {
+  const address = parseAddress(request.address);
+  const texts = new SourceTexts(corpus);
+  if (!corpus.texts.has(address.text))
+    throw new InvalidInput(`No source file has the ID ${address.text}.`);
+  if (isRetired(corpus.texts.get(address.text).manifest.data))
+    throw new InvalidInput(`The source file ${address.text} is retired.`);
+  const view = texts.view(address.text);
+  if (!view)
+    throw new InvalidInput("That source file is damaged, so nothing is copied from it. `check` explains why.");
+  const { start, end } = resolveSpan(view, address);
+  const exact = view.streams[address.stream].text.slice(start, end);
+  if (!/\S/u.test(exact))
+    throw new InvalidInput("The address holds only white space.");
+  const locator = locatorOf(view, address.stream, start, end);
+  if (!locator) {
+    throw new InvalidInput(view.paged ? "A page this passage lies on has no established printed label, so no locator can be copied. Label the page first (`source pages`, `source label`)." : "This source has no pages, and the passage lies in no one chapter or numbered paragraph, so no locator can be copied.");
+  }
+  const source = corpus.byId.get(view.source);
+  if (source?.data?.kind !== "source")
+    throw new InvalidInput("The source file names no readable source record.");
+  const id = `${KINDS.passage.prefix}${request.token()}`;
+  const anchor = view.address(address.stream, start, end);
+  const record = {
+    schema: RECORD_SCHEMA,
+    id,
+    kind: "passage",
+    created: { at: request.now.toISOString().replace(/\.\d+Z$/, "Z"), by: { ...request.actor } },
+    source: view.source,
+    text: view.id,
+    anchor,
+    quote: { exact },
+    locator: { ...locator },
+    source_record_sha256: sourceBinding(source.data)
+  };
+  return {
+    record: { id, path: recordPath("passage", id), text: canonical(record) },
+    passage: id,
+    text: view.id,
+    address: addressText(view.id, anchor),
+    exact,
+    quotation: renderQuotation(exact),
+    locator,
+    places: view.partsOf(address.stream, start, end).map((i) => placeOf(view, i)),
+    method: view.method
+  };
+}
+var anchorsOf = (passage) => Array.isArray(passage.anchor) ? passage.anchor.filter(isObject) : [];
+function textAt(texts, passage) {
+  const view = texts.view(String(passage.text));
+  const anchor = anchorsOf(passage);
+  if (!view || anchor.length === 0)
+    return { state: "unavailable" };
+  const pieces = [];
+  for (const a of anchor) {
+    const part = view.part(a.index);
+    if (!part || part.digest !== a.page_sha256)
+      return { state: "changed", index: a.index };
+    const points = [...part.streams[a.stream]];
+    pieces.push(points.slice(a.start, a.end).join(""));
+  }
+  return { state: "ok", view, stream: anchor[0].stream, text: pieces.join(`
+`), indexes: anchor.map((a) => a.index) };
+}
+function citationFromPassage(corpus, record) {
+  const passage = corpus.byId.get(String(record.passage))?.data;
+  if (passage?.kind !== "passage" || isRetired(passage))
+    throw new InvalidInput(`No passage record in effect has the ID ${String(record.passage)}.`);
+  if (record.quotation !== undefined || record.locator !== undefined) {
+    throw new InvalidInput("A citation made from a passage takes its quotation and locator from the passage. Leave both out; they are never typed.");
+  }
+  const at = textAt(new SourceTexts(corpus), passage);
+  if (at.state !== "ok" || !isObject(passage.quote) || at.text !== passage.quote.exact) {
+    throw new InvalidInput("The text at the passage's address is no longer what the passage copied. Capture it again.");
+  }
+  record.quotation = renderQuotation(at.text);
+  record.locator = { ...passage.locator };
+  const source = corpus.byId.get(String(passage.source))?.data;
+  if (record.key === undefined && record.source === undefined && source) {
+    if (typeof source.citation_key === "string")
+      record.key = source.citation_key;
+    else
+      record.source = passage.source;
+  }
+}
+
+// packages/core/src/checks/changed.ts
+var sourceBinding = (source) => digest(Object.fromEntries(SOURCE_BINDING_FIELDS.flatMap((f) => source[f] === undefined ? [] : [[f, source[f]]])));
+var list3 = (value) => value === undefined ? [] : [value].flat().map(String);
+function walker(corpus) {
+  const texts = new SourceTexts(corpus);
+  const links = active(corpus, "attestation");
+  const unreadable = new Set(corpus.records.filter((f) => f.state !== "ok").map((f) => f.path.replace(/^.*\//, "").replace(/\.json$/, "")));
+  return function follow(id, walk, through, seen) {
+    if (seen.has(id))
+      return;
+    seen.add(id);
+    const file = corpus.byId.get(id);
+    if (!file) {
+      if (unreadable.has(id))
+        walk.unread = true;
+      return;
+    }
+    const data = file.data;
+    const kind = String(data.kind);
+    if (["source_text", "source"].includes(kind)) {
+      walk.reached++;
+      if (isRetired(data))
+        walk.changes.push({ reason: "depends_on_retired", record: file, what: `retired ${kind}`, through });
+    }
+    const next = (ids) => ids.forEach((to) => follow(to, walk, through.length === 0 || through.at(-1) !== id ? [...through, id] : through, seen));
+    if (kind === "source_text")
+      next(list3(data.source));
+    if (kind === "passage") {
+      const now = textAt(texts, data);
+      if (now.state === "changed") {
+        walk.changes.push({ reason: "text_changed", record: file, what: `the text at index ${now.index} changed after passage ${id} was captured`, through: [...through, id] });
+      } else if (now.state === "unavailable")
+        walk.unread = true;
+      next([...list3(data.text), ...list3(data.source)]);
+      const source = corpus.byId.get(String(data.source));
+      if (source?.data?.kind === "source" && typeof data.source_record_sha256 === "string" && data.source_record_sha256 !== sourceBinding(source.data)) {
+        walk.changes.push({ reason: "source_details_changed", record: source, what: `source details changed since passage ${id} was anchored`, through: [...through, id] });
+      }
+    }
+    if (kind === "note")
+      next([...list3(data.passages), ...list3(data.source)]);
+    if (kind === "claim")
+      next(links.filter((l) => l.data.claim === id).map((l) => String(l.data.evidence)));
+  };
+}
+function dependants(corpus) {
+  const follow = walker(corpus);
+  const out = [];
+  for (const kind of ["passage", "note", "claim"]) {
+    for (const file of active(corpus, kind)) {
+      const walk = { changes: [], reached: 0, unread: false };
+      follow(idOf(file), walk, [], new Set);
+      if (walk.reached > 0 || walk.unread)
+        out.push({ file, walk });
+    }
+  }
+  if (hasManuscript(corpus))
+    return out;
+  for (const { citation, key, matches } of resolveCitations(corpus)) {
+    const walk = { changes: [], reached: 0, unread: false };
+    const seen = new Set;
+    let sources = matches;
+    if (sources.length === 0) {
+      sources = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source" && isRetired(f.data) && (key !== undefined ? citationKeys(f.data).includes(key) : idOf(f) === citation.data.source));
+    }
+    for (const claim of list3(citation.data.claims))
+      follow(claim, walk, [], seen);
+    for (const passage of list3(citation.data.passage))
+      follow(passage, walk, [], seen);
+    const source = sources.length === 1 ? idOf(sources[0]) : undefined;
+    if (source) {
+      follow(source, walk, [], seen);
+      if (citation.data.passage === undefined) {
+        const since = String(isObject(citation.data.created) ? citation.data.created.at : "");
+        for (const record of corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source_text" && f.data.source === source)) {
+          walk.reached++;
+          const retired = record.data.retired;
+          if (!isObject(retired) || !isObject(retired.stamp) || Date.parse(String(retired.stamp.at)) < Date.parse(since))
+            continue;
+          if (!walk.changes.some((c) => c.record === record)) {
+            walk.changes.push({ reason: "depends_on_retired", record, what: "retired source file", through: [source] });
+          }
+        }
+      }
+    }
+    if (walk.reached > 0 || walk.unread)
+      out.push({ file: citation, walk, ...source ? { source } : {} });
+  }
+  return out;
+}
+function changedResults(corpus) {
+  const check = "source.changed";
+  return dependants(corpus).map(({ file, walk, source }) => {
+    const data = file.data;
+    const evidence = [{ name: `${String(data.kind)}_file`, class: "location", value: file.path }];
+    for (const change of walk.changes) {
+      const retired = change.record.data.retired;
+      evidence.push({ name: "changed_record", class: "location", value: change.record.path });
+      evidence.push({
+        name: "change",
+        class: "metadata",
+        value: change.reason === "depends_on_retired" && isObject(retired) && isObject(retired.stamp) ? `${change.what} on ${String(retired.stamp.at)}: ${String(retired.reason)}${typeof retired.replaced_by === "string" ? ` (replaced by ${retired.replaced_by})` : ""}` : change.what
+      });
+      const path = change.through.filter((id) => id !== idOf(file));
+      if (path.length > 0)
+        evidence.push({ name: "reached_through", class: "location", value: path.join(", ") });
+    }
+    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
+    const reason = ["depends_on_retired", "text_changed", "source_details_changed"].find((r) => walk.changes.some((c) => c.reason === r)) ?? (walk.unread ? "record_unreadable" : undefined);
+    return result({
+      check,
+      outcome: walk.changes.length > 0 ? "fail" : walk.unread ? "unverifiable" : "pass",
+      ...reason ? { reason } : {},
+      subject: subjectOf(file),
+      locus: idOf(file) ?? file.path,
+      evidence,
+      item: itemOf(file),
+      ...source ? { source } : {},
+      ...sentence ? { sentence } : {}
+    });
+  });
+}
+
+// packages/core/src/checks/bibliography.ts
+var hasManuscript = (corpus) => corpus.manuscript.some((f) => f.path.endsWith(".md"));
+function active(corpus, kind) {
+  return corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+}
+var unreadableIn = (corpus, directory) => corpus.records.some((f) => (f.state === "unreadable" || f.state === "version_unsupported") && f.path.startsWith(`records/${directory}/`));
+function resolveCitations(corpus) {
+  const sources = active(corpus, "source");
+  return active(corpus, "citation").map((citation) => {
+    const { key, source } = citation.data;
+    if (typeof key === "string") {
+      return { citation, key, matches: sources.filter((s) => citationKeys(s.data).includes(key)) };
+    }
+    return { citation, matches: sources.filter((s) => idOf(s) === source) };
+  });
+}
+function listedSources(corpus) {
+  const list = corpus.settings.data?.bibliography_include;
+  if (!Array.isArray(list))
+    return [];
+  return [...new Set(list)].flatMap((id) => {
+    const file = typeof id === "string" ? corpus.byId.get(id) : undefined;
+    return file?.data?.kind === "source" ? [file] : [];
+  });
+}
+function citeKeyResults(corpus) {
+  if (hasManuscript(corpus))
+    return [];
+  const allSources = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source");
+  return resolveCitations(corpus).map(({ citation, key, matches }) => {
+    const data = citation.data;
+    const subject = subjectOf(citation);
+    const evidence = [{ name: "citation_file", class: "location", value: citation.path }];
+    if (key !== undefined)
+      evidence.push({ name: "key", class: "manuscript", value: key });
+    for (const [name, field] of [["chapter", "chapter"], ["document_position", "document_position"]]) {
+      if (typeof data[field] === "string")
+        evidence.push({ name, class: "location", value: data[field] });
+    }
+    if (isObject(data.locator)) {
+      evidence.push({ name: "locator", class: "manuscript", value: `${String(data.locator.label)} ${String(data.locator.value)}` });
+    }
+    const only = matches.length === 1 ? idOf(matches[0]) : undefined;
+    const sentence = isObject(data.sentence) && typeof data.sentence.text === "string" && typeof data.sentence.sha256 === "string" ? { text: data.sentence.text, sha256: data.sentence.sha256 } : undefined;
+    if (sentence)
+      evidence.push({ name: "sentence", class: "manuscript", value: sentence.text });
+    const common = {
+      check: "cite.key",
+      subject,
+      locus: idOf(citation) ?? citation.path,
+      evidence,
+      item: itemOf(citation),
+      ...sentence ? { sentence } : {},
+      ...only ? { source: only } : {}
+    };
+    if (only)
+      return result({ ...common, outcome: "pass" });
+    if (matches.length > 1) {
+      for (const match of matches)
+        evidence.push({ name: "held_by", class: "location", value: match.path });
+      return result({ ...common, outcome: "fail", reason: "key_ambiguous" });
+    }
+    if (key === undefined && data.source === undefined)
+      return result({ ...common, outcome: "fail", reason: "key_missing" });
+    if (unreadableIn(corpus, "sources"))
+      return result({ ...common, outcome: "unverifiable", reason: "source_unreadable" });
+    if (key !== undefined) {
+      for (const source of allSources) {
+        for (const held of citationKeys(source.data)) {
+          if (held === key)
+            evidence.push({ name: "held_by_retired_source", class: "location", value: source.path });
+          else if (held.toLowerCase() === key.toLowerCase()) {
+            evidence.push({ name: "similar_key_differs_in_letter_case", class: "metadata", value: held });
+          }
+        }
+      }
+    }
+    return result({ ...common, outcome: "fail", reason: "key_unknown" });
+  });
+}
+function uncitedResults(corpus) {
+  const cited = new Set(resolveCitations(corpus).flatMap((r) => r.matches.length === 1 ? [idOf(r.matches[0])] : []));
+  return listedSources(corpus).map((source) => {
+    const id = idOf(source);
+    const key = source.data.citation_key;
+    const evidence = [{ name: "source_file", class: "location", value: source.path }];
+    if (typeof key === "string")
+      evidence.push({ name: "key", class: "metadata", value: key });
+    const binding = sourceBinding(source.data);
+    const common = {
+      check: "bib.uncited",
+      subject: subjectOf(source),
+      source: id,
+      locus: "bibliography_include",
+      evidence,
+      item: { record: id, content_sha256: binding }
+    };
+    const cannot = hasManuscript(corpus) ? "manuscript_not_read" : cited.has(id) ? undefined : unreadableIn(corpus, "citations") ? "citation_unreadable" : active(corpus, "citation").length === 0 ? "no_manuscript" : undefined;
+    if (cannot)
+      return result({ ...common, outcome: "unverifiable", reason: cannot });
+    return cited.has(id) ? result({ ...common, outcome: "pass" }) : result({ ...common, outcome: "fail", reason: "not_cited" });
+  });
+}
+
+// packages/core/src/checks/not-run.ts
+var CHECK_DESCRIPTIONS = {
+  "record.valid": "the extra rules for some record kinds in this project",
+  "cite.key": "citation keys in the manuscript files",
+  "bib.uncited": "bibliography entries that are never cited",
+  "source.held": "whether each cited source's text is in the project",
+  "source.pages": "whether every page or section of each source file is present, in order and unchanged",
+  "source.labels": "whether printed page numbers run as a book's would",
+  "source.footnotes": "whether note markers and notes pair",
+  "source.original": "whether each source file still matches its original",
+  "source.changed": "work that rests on source text that has since changed",
+  "quote.present": "whether quotations appear in the source text",
+  "quote.page": "whether quotations are on the cited pages or in the cited chapter",
+  "quote.self": "your own claims presented as quotations from a source",
+  "locator.extent": "whether cited pages and other locators fall inside the source",
+  "meta.source": "authors, titles and dates against what your sources state",
+  "meta.resolver": "authors, titles and dates against saved catalogue lookups",
+  "id.resolves": "whether DOIs and other identifiers name these works",
+  "number.present": "whether cited figures appear in the source text",
+  "construct.credit": "who each construct is credited to",
+  "claim.complete": "whether each claim has evidence, confidence and a reason",
+  "construct.complete": "whether each construct has a definition and ownership",
+  "claim.inactive": "manuscript text linked to a retired claim",
+  "cite.unlinked": "citations not linked to any claim",
+  "takeover.removal": "claims left without support by removing a citation",
+  "draft.marked": "passages marked as needing a source",
+  "support.current": "whether each cited claim has a current claim-support record",
+  "restricted.leak": "restricted site coordinates in project files",
+  "coordinate.stray": "coordinates written in project files",
+  "image.resolution": "image resolution",
+  "image.alt": "image alternative text",
+  "image.credit": "image credits",
+  "image.permission": "image permissions",
+  "image.vector": "vector images",
+  "image.font": "image fonts",
+  "image.placement": "image placement",
+  "image.metadata": "location data inside images",
+  "cite.format": "citation formatting (checked during a build)",
+  "build.uncommitted": "uncommitted changes (checked during a build)",
+  "changelog.missing": "the changelog entry (checked during a build)",
+  "package.leak": "protected text in a reviewer package (checked during a build)"
+};
+function notRun(corpus) {
+  const manuscript = hasManuscript(corpus);
+  const citations = active(corpus, "citation");
+  const has = (...kinds) => kinds.some((k) => active(corpus, k).length > 0);
+  const quoting = citations.some((c) => c.data.quotation !== undefined);
+  const applies = {
+    "quote.self": has("claim") && (manuscript || quoting),
+    "construct.credit": has("construct"),
+    "claim.complete": has("claim"),
+    "construct.complete": has("construct"),
+    "claim.inactive": manuscript && has("claim"),
+    "cite.unlinked": manuscript && has("claim"),
+    "takeover.removal": has("round_choice"),
+    "draft.marked": manuscript,
+    "support.current": has("claim"),
+    "restricted.leak": active(corpus, "place_location").some((f) => isObject(f.data.sensitivity) && f.data.sensitivity.class !== "public"),
+    ...Object.fromEntries(["resolution", "alt", "credit", "permission", "vector", "font", "placement", "metadata"].map((n) => [`image.${n}`, has("image")]))
+  };
+  const missing = new Set(Object.entries(applies).filter(([, yes]) => yes).map(([check]) => check));
+  if (corpus.records.some((f) => f.state === "ok" && !FULLY_CHECKED_KINDS.has(String(f.data?.kind))))
+    missing.add("record.valid");
+  if (manuscript) {
+    for (const check of ["cite.key", "source.held", "quote.present", "quote.page", "locator.extent", "number.present", "source.changed"])
+      missing.add(check);
+    if (listedSources(corpus).length > 0)
+      missing.add("bib.uncited");
+  }
+  return [...missing].sort().map((check) => ({ check, reason: "not_implemented" }));
+}
+// packages/core/src/render.ts
+function groupResults(results) {
+  const groups = new Map;
+  for (const result of results) {
+    const key = result.evidence.find((e) => e.name === "key" || e.name === "points_at");
+    const cause = [result.check, result.reason_code ?? "", key?.value ?? ""].join("\x00");
+    groups.set(cause, [...groups.get(cause) ?? [], result]);
+  }
+  return [...groups.values()];
+}
+var printable = (text) => text.replace(/\r?\n|\f/g, " \u23CE ").replace(/\u00ad/g, "\xAC").replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "?");
+function renderFindings(results) {
+  const lines = [];
+  groupResults(results.filter((r) => r.open)).forEach((group, i) => {
+    const first = group[0];
+    const verdict = first.outcome === "fail" ? "PROBLEM" : "COULD NOT CHECK";
+    const places = group.length === 1 ? "" : `, ${group.length} places`;
+    lines.push("", `${i + 1}. ${verdict}: ${first.message}  [${first.check}${places}]`, `   Why it matters: ${first.why}`);
+    for (const suggestion of first.suggestions)
+      lines.push(`   What to do: ${suggestion}`);
+    for (const item of group) {
+      lines.push(`   - ${printable(item.subject)}`);
+      for (const e of item.evidence)
+        lines.push(`       ${e.name.replaceAll("_", " ")}: ${printable(e.value)}`);
+    }
+  });
+  return lines;
+}
+function quotationNotes(results) {
+  const joined = results.filter((r) => r.check === "quote.present" && r.outcome === "pass").flatMap((r) => r.evidence.filter((e) => e.name === "joined_at_line_end").map((e) => `   - ${printable(r.subject)}: ${printable(e.value)}`));
+  return joined.length === 0 ? [] : [
+    "",
+    "For information, not a finding: these quotations matched after joining a word the source text splits at a line end.",
+    "If the hyphen belongs to the word, the quotation should keep it: look at the page.",
+    ...joined
+  ];
+}
+function renderCoverage(body, most = 3) {
+  const lines = [];
+  for (const c of body.verification) {
+    lines.push(`   - ${c.directory} (${c.method}): ${coverageWords(c)}`);
+    for (const run of c.runs.filter((r) => r.current && r.differing_parts > 0)) {
+      lines.push(`       compared with ${printable(run.against)}${run.independent ? "" : " (not independent of the conversion)"}: ${(run.agreement_permille / 10).toFixed(1)}% of words agree`);
+      for (const d of run.disagreements.slice(0, most)) {
+        lines.push(`         index ${d.index}: here "${printable(d.reading)}" / there "${printable(d.other)}"`);
+      }
+      if (run.disagreements.length > most)
+        lines.push(`         and more: see \`coverage ${c.text}\``);
+    }
+  }
+  return lines;
+}
+function renderReport(body) {
+  const { summary } = body;
+  const lines = [];
+  if (body.label === "checked_clean") {
+    lines.push("CHECKED CLEAN: the checks found nothing open.", "This does not mean that the book is correct. It covers only what is in these project files.");
+  } else {
+    const open = (outcome) => body.results.filter((r) => r.open && r.outcome === outcome).length;
+    const parts = [
+      `${open("fail")} problem(s)`,
+      `${open("unverifiable")} could not be checked`,
+      `${summary.not_implemented} kind(s) of check this version does not run`
+    ];
+    lines.push(`OPEN FINDINGS: ${parts.join(", ")}. Nothing is blocked.`);
+  }
+  lines.push(`Checked the whole project: ${summary.pass} result(s) passed.`);
+  lines.push(...renderFindings(body.results));
+  lines.push(...quotationNotes(body.results));
+  const confirmed = body.results.filter((r) => r.confirmed_by !== undefined);
+  if (confirmed.length > 0) {
+    lines.push("", "For information: these could not be compared and a person confirmed the details. They are confirmed by the author, not verified.");
+    for (const r of confirmed)
+      lines.push(`   - ${r.subject} [${r.check}] review ${r.confirmed_by}`);
+  }
+  if (body.verification.length > 0) {
+    lines.push("", "For information, not findings: what has been compared with and reviewed for each source file.", ...renderCoverage(body));
+  }
+  const missing = body.not_run;
+  if (missing.length > 0) {
+    lines.push("", "NOT CHECKED: this version does not run these, so the project is not called checked clean.", "Why it matters: a mistake of one of these kinds would go unnoticed. What to do: check them by hand where they matter.");
+    for (const entry of missing)
+      lines.push(`   - ${CHECK_DESCRIPTIONS[entry.check]}  [${entry.check}]`);
+  }
+  if (body.unreviewed.length > 0) {
+    lines.push("", `For information, not a finding: ${body.unreviewed.length} cited item(s) are unreviewed or not admitted.`);
+    for (const item of body.unreviewed)
+      lines.push(`   - ${item.record} (${item.reason.replace("_", " ")})`);
+  }
+  return `${lines.join(`
+`)}
+`;
+}
+// packages/core/src/capture.ts
 var LIMITS = {
   input_bytes: 500 * 1024 * 1024,
-  pages: 5000,
+  parts: 5000,
   text_bytes: 100 * 1024 * 1024,
   page_map_bytes: 5 * 1024 * 1024,
-  extraction_seconds: 300
+  conversion_seconds: 300
 };
-var TEXT_PROFILE = "utf8-lf/0";
-var stamp = (actor, now) => ({ at: now.toISOString().replace(/\.\d+Z$/, "Z"), by: { ...actor } });
-var write2 = (kind, record) => {
-  const id = record.id;
-  return { id, path: recordPath(kind, id), text: canonical(record) };
-};
+var time = (now) => now.toISOString().replace(/\.\d+Z$/, "Z");
+var stamp = (actor, now) => ({ at: time(now), by: { ...actor } });
 var fresh = (kind, token, actor, now) => ({ schema: RECORD_SCHEMA, id: `${KINDS[kind].prefix}${token()}`, kind, created: stamp(actor, now) });
-
-class DuplicateCopy extends Error {
-  holders;
-  constructor(holders) {
-    super("duplicate copy");
-    this.holders = holders;
+var record = (kind, value) => ({ id: String(value.id), path: recordPath(kind, String(value.id)), text: canonical(value) });
+function assertValid(type, kind, text) {
+  const problems = [];
+  checkShape(type, parseJson(text).value, "", kind, problems, []);
+  if (problems.length > 0) {
+    throw new InvalidInput(`These values do not make a valid ${kind} record (${problems.map((p) => `${p.code} at ${p.field}`).join(", ")}).`);
   }
 }
 function sourceRecord(corpus, id) {
@@ -108504,205 +110150,413 @@ function sourceRecord(corpus, id) {
     throw new InvalidInput(`${file.path} holds values that rewriting would change. Correct it first.`);
   return file.data;
 }
-function planAddSource(corpus, request) {
-  const { actor, now, token } = request;
-  const named = request.source === undefined ? undefined : sourceRecord(corpus, request.source);
-  const holders = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "capture" && !isRetired(f.data) && f.data.sha256 === request.sha256).map((f) => ({ source: String(f.data.source), capture: idOf(f) }));
-  const own = holders.find((h) => h.source === request.source);
-  const rights = Object.fromEntries(Object.entries(request.rights).filter(([, v]) => v !== undefined));
-  const changesRights = Object.keys(rights).length > 0;
-  if (!named && holders.length > 0)
-    throw new DuplicateCopy(holders);
-  const records = [];
-  const source = request.source ?? `${KINDS.source.prefix}${token()}`;
-  if (!named) {
-    records.push(write2("source", {
-      schema: RECORD_SCHEMA,
-      id: source,
-      kind: "source",
-      created: stamp(actor, now),
-      admission: "candidate",
-      intake: "raw",
-      ...changesRights ? { rights } : {}
-    }));
-  } else if (changesRights) {
-    const before = isObject(named.rights) ? named.rights : {};
-    records.push(write2("source", { ...named, rights: { ...before, ...rights }, changed: stamp(actor, now) }));
-  }
-  if (own)
-    return { state: "already_held", source, capture: own.capture, records };
-  const capture = write2("capture", {
-    ...fresh("capture", token, actor, now),
-    source,
-    sha256: request.sha256,
-    size: request.size,
-    media_type: request.media_type,
-    origin: request.origin ?? "unknown",
-    acquired_at: request.acquired_at,
-    ...request.source_version === undefined ? {} : { source_version: request.source_version },
-    admitted_by: { ...actor }
-  });
-  assertValid("Capture", "capture", capture);
-  return { state: "add", source, new_source: !named, capture, records: [...records, capture] };
-}
-function assertValid(type, kind, record) {
-  const problems = [];
-  checkShape(type, parseJson(record.text).value, "", kind, problems, []);
-  if (problems.length > 0) {
-    throw new InvalidInput(`These values do not make a valid ${kind} record (${problems.map((p) => `${p.code} at ${p.field}`).join(", ")}).`);
-  }
-}
-var decode = (bytes, what) => {
-  try {
-    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
-  } catch {
-    throw new InvalidInput(`${what} is not valid UTF-8 text.`);
-  }
-};
-var normalizeText = (text) => text.replace(/^\uFEFF/, "").replace(/\r\n?/g, `
-`);
-function pageSpans(text) {
-  const pages = text.split("\f");
-  if (pages.length > 1 && !/\S/u.test(pages.at(-1)))
-    pages.pop();
-  let start = 0;
-  return pages.map((page, page_index) => {
-    const length = [...page].length;
-    const span = { page_index, start, end: start + length };
-    start += length + 1;
-    return span;
+function applyPageMap(parts, segments) {
+  const labels = pageLabels(segments);
+  return parts.map((part) => {
+    const segment = segments.find((s) => part.index >= s.first_index && part.index <= s.last_index);
+    const label = labels.get(part.index);
+    return {
+      ...part,
+      label: label !== undefined ? { status: "labelled", label, basis: segment.evidence } : segment?.style === "unnumbered" && segment.evidence ? { status: "none", basis: segment.evidence } : { status: "undetermined" }
+    };
   });
 }
-function parsePageMap(bytes, pageCount) {
+function parsePageMap(bytes) {
   if (bytes.length > LIMITS.page_map_bytes)
     throw new InvalidInput("The page map is larger than the limit of 5 MiB.");
   let value;
   try {
-    value = parseJson(decode(bytes, "The page map")).value;
+    value = parseJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)).value;
   } catch (error) {
-    if (error instanceof JsonUnreadable)
-      throw new InvalidInput(`The page map is not usable JSON (${error.problem}).`);
-    throw error;
+    throw new InvalidInput(`The page map is not usable UTF-8 JSON${error instanceof JsonUnreadable ? ` (${error.problem})` : ""}.`);
   }
   if (!Array.isArray(value))
     throw new InvalidInput("The page map must be a JSON list of page segments.");
   const problems = [];
-  value.forEach((segment, i) => checkShape("PageSegment", segment, `/${i}`, "extraction.pages", problems, []));
-  const codes = [
-    ...problems.map((p) => `${p.code} at ${p.field}`),
-    ...checkPageSegments(value).map((p) => `${p.code} at /${p.index}`)
-  ];
-  const segments = value;
-  if (codes.length === 0 && segments.some((s) => s.last_index >= pageCount))
-    codes.push("a segment ends beyond the last page of the text");
+  value.forEach((segment, i) => checkShape("PageSegment", segment, `/${i}`, "page_map", problems, []));
+  const codes = [...problems.map((p) => `${p.code} at ${p.field}`), ...checkPageSegments(value).map((p) => `${p.code} at /${p.index}`)];
   if (codes.length > 0)
     throw new InvalidInput(`The page map cannot be used: ${codes.join("; ")}.`);
-  return segments;
+  return value;
 }
 
-class NoExtractor extends Error {
-}
-var joinPages = (pages) => pages.map((page) => `${page}\f`).join("");
-function planSourceText(corpus, request) {
-  const capture = corpus.byId.get(request.capture)?.data;
-  if (capture?.kind !== "capture")
-    throw new InvalidInput(`No readable capture record has the ID ${request.capture}.`);
-  if (isRetired(capture))
-    throw new InvalidInput(`The capture ${request.capture} is retired.`);
-  const plain = capture.media_type === "text/plain";
-  if (plain && request.layer)
-    throw new InvalidInput("This copy is plain text, so it is read as it is. Leave out --text-layer.");
-  if (plain && (request.method || request.tool))
-    throw new InvalidInput("--method, --tool and --tool-version describe a PDF's or a scan's text.");
-  const read = request.layer ? undefined : request.read;
-  if (!plain && !request.layer && !read)
-    throw new NoExtractor;
-  if (read && request.tool)
-    throw new InvalidInput("--tool and --tool-version describe a supplied text layer. Stemma records the reader it used itself.");
-  const bytes = request.layer ?? (read ? new TextEncoder().encode(joinPages(read.pages)) : request.copy);
-  if (bytes.length > LIMITS.text_bytes)
-    throw new InvalidInput("The text is larger than the limit of 100 MiB.");
-  const text = normalizeText(decode(bytes, request.layer ? "The text layer" : "The copy"));
-  if (text.includes("\x00"))
-    throw new InvalidInput("The text holds a NUL character, so it is not usable text.");
-  if (!/\S/u.test(text)) {
-    throw new InvalidInput(read ? "There is no machine-readable text: no page of this PDF has a text layer, as with a scan that was never put through character recognition. No extraction was saved, and this copy does not count as checkable. Stemma recognizes no characters in page images; supply recognized text with --text-layer." : "There is no machine-readable text: it is empty or only white space. No extraction was saved, and this copy does not count as checkable.");
+class DuplicateOriginal extends Error {
+  holders;
+  constructor(holders) {
+    super("duplicate original");
+    this.holders = holders;
   }
-  const spans = !plain || text.includes("\f") ? pageSpans(text) : undefined;
-  if ((spans?.length ?? 0) > LIMITS.pages)
-    throw new InvalidInput("The text has more than the limit of 5,000 pages.");
-  if (request.pageMap && !spans)
-    throw new InvalidInput("This text has no page breaks, so there are no pages to label.");
-  const pages = request.pageMap ? parsePageMap(request.pageMap, spans.length) : undefined;
-  const encoded = new TextEncoder().encode(text);
-  const method = plain ? "born_text" : request.method ?? "text_layer";
-  const empty = read ? read.pages.flatMap((page, i) => /\S/u.test(page) ? [] : [i]) : [];
-  const note = [
-    request.note,
-    empty.length > 0 ? `${empty.length} of ${read.pages.length} pages have no text in the file's text layer (file indexes ${ranges(empty)}).` : undefined
-  ].filter(Boolean).join(" ");
-  const record = write2("extraction", {
-    ...fresh("extraction", request.token, request.actor, request.now),
-    capture: request.capture,
-    capture_sha256: capture.sha256,
-    tool: plain ? { name: "stemma", version: request.stemma } : read?.tool ?? request.tool ?? { name: "unknown", version: "unknown" },
-    normalization_profile: TEXT_PROFILE,
-    text_sha256: sha256(encoded),
-    text_size: encoded.length,
-    ...pages ? { pages } : {},
-    ...spans ? { page_spans: spans } : {},
-    quality: { method, level: "unassessed", ...note ? { note } : {} }
+}
+var partFront = (part, paged, method) => ({
+  index: part.index,
+  label_status: part.label.status,
+  ...part.label.label !== undefined ? { label: part.label.label } : {},
+  ...part.label.basis !== undefined ? { label_basis: part.label.basis } : {},
+  ...part.section !== undefined && !paged ? { section: part.section.slice(0, 200) } : {},
+  ...part.chapter !== undefined && !paged ? { chapter: part.chapter } : {},
+  method,
+  level: "unassessed",
+  columns: part.columns,
+  undetermined: part.undetermined,
+  ...part.note !== undefined ? { note: part.note } : {},
+  ...part.removed !== undefined ? { removed: part.removed } : {}
+});
+function directoryFor(corpus, wanted, key, id) {
+  const taken = new Set(corpus.sources.map((f) => f.path.split("/")[1]));
+  if (wanted !== undefined) {
+    if (slugOf(wanted) !== wanted)
+      throw new InvalidInput("--name takes lowercase letters, digits and hyphens, at most 80.");
+    if (taken.has(wanted))
+      throw new InvalidInput(`sources/${wanted} already exists. Nothing is overwritten.`);
+    return `sources/${wanted}`;
+  }
+  const base = typeof key === "string" ? slugOf(key) : undefined;
+  for (let n = 1;base && n < 100; n++) {
+    const name = n === 1 ? base : `${base}-${n}`;
+    if (!taken.has(name))
+      return `sources/${name}`;
+  }
+  return `sources/${id}`;
+}
+function planSourceText(corpus, request) {
+  const { actor, now, token, converted, original } = request;
+  if (actor.kind === "model" && converted.method === "manual") {
+    throw new InvalidInput("A typed transcription is a person's work: a language model does not produce source text.");
+  }
+  if (converted.parts.length > LIMITS.parts)
+    throw new InvalidInput(`The original has more than the limit of ${LIMITS.parts} pages or sections.`);
+  const named = request.source === undefined ? undefined : sourceRecord(corpus, request.source);
+  const holders = [...corpus.texts].flatMap(([id, text]) => {
+    const data = text.manifest.data;
+    const files = isObject(data.original) && Array.isArray(data.original.files) ? data.original.files.filter(isObject) : [];
+    return !isRetired(data) && files.some((f) => original.files.some((o) => o.sha256 === f.sha256)) ? [{ source: String(data.source), text: id }] : [];
   });
-  assertValid("Extraction", "extraction", record);
-  const labels = pageLabels(pages ?? []);
+  if (!named && holders.length > 0)
+    throw new DuplicateOriginal(holders);
+  const records = [];
+  const source = request.source ?? `${KINDS.source.prefix}${token()}`;
+  if (!named)
+    records.push(record("source", { schema: RECORD_SCHEMA, id: source, kind: "source", created: stamp(actor, now), admission: "candidate", intake: "raw" }));
+  const id = `${KINDS.source_text.prefix}${token()}`;
+  const directory = directoryFor(corpus, request.name, named?.citation_key, id);
+  const files = [];
+  let size = 0;
+  const entries = converted.parts.map((part) => {
+    const front = partFront(part, converted.paged, converted.method);
+    assertValid("SourcePage", "source_page", canonical(front));
+    const text = serializePart(front, part.blocks);
+    size += Buffer.byteLength(text);
+    const file = partFile(converted.paged, part.index);
+    files.push({ path: `${directory}/${file}`, text });
+    return { index: part.index, file, sha256: fileDigest(text) };
+  });
+  if (size > LIMITS.text_bytes)
+    throw new InvalidInput("The converted text is larger than the limit of 100 MiB.");
+  const identity = { ...converted.identity, ...request.identity };
+  const note = [request.note, ...converted.notes].filter(Boolean).join(" ");
+  const front = {
+    schema: RECORD_SCHEMA,
+    id,
+    kind: "source_text",
+    created: stamp(actor, now),
+    source,
+    ...Object.keys(identity).length > 0 ? { identity } : {},
+    original: {
+      form: original.form,
+      files: original.files,
+      ...converted.paged && converted.page_count !== undefined ? { page_count: converted.page_count } : {},
+      ...original.description !== undefined ? { description: original.description } : {},
+      ...original.held_at !== undefined ? { held_at: original.held_at } : {},
+      obtained_from: original.obtained_from ?? "unknown",
+      acquired_at: original.acquired_at,
+      ...original.version ?? converted.version ? { version: original.version ?? converted.version } : {}
+    },
+    conversion: {
+      method: converted.method,
+      tools: converted.tools,
+      level: "unassessed",
+      ...converted.recognition ? { recognition: converted.recognition } : {},
+      ...note ? { note } : {}
+    },
+    paged: converted.paged,
+    coverage: request.coverage_note !== undefined ? "partial" : converted.coverage,
+    ...request.coverage_note !== undefined ? { coverage_note: request.coverage_note } : converted.coverage === "partial" ? { coverage_note: "Only the pages supplied are included." } : {},
+    pages: entries
+  };
+  assertValid("SourceText", "source_text", canonical(front));
+  files.push({ path: `${directory}/source.md`, text: serializeManifest(front) });
+  return { source, new_source: !named, text: id, directory, files, records, parts: entries.length, paged: converted.paged };
+}
+function loadedText(corpus, id) {
+  const text = corpus.texts.get(id);
+  if (!text)
+    throw new InvalidInput(`No readable source file has the ID ${id}.`);
+  if (isRetired(text.manifest.data))
+    throw new InvalidInput(`The source file ${id} is retired.`);
+  return text;
+}
+var manifestBody = (bytes) => {
+  const split = splitFrontMatter(new TextDecoder().decode(bytes));
+  return "problem" in split ? "" : split.body;
+};
+var fileText = (corpus, path) => {
+  const bytes = corpus.sources.find((f) => f.path === path)?.bytes;
+  return bytes && new TextDecoder().decode(bytes);
+};
+function planLabel(corpus, id, segments, actor, now) {
+  const text = loadedText(corpus, id);
+  if (!text.usable)
+    throw new InvalidInput("That source file is damaged. `check` explains why; repair it or seal your edit first.");
+  if (text.manifest.data.paged !== true)
+    throw new InvalidInput("This source has no pages, so there are no pages to label.");
+  const wanted = new Map(applyPageMap(text.parts.map((p) => ({ index: p.index, label: { status: "undetermined" } })), segments).map((p) => [p.index, p.label]));
+  const digests = new Map;
+  const files = [];
+  for (const part of text.parts) {
+    const label = wanted.get(part.index);
+    const { label: _l, label_basis: _b, label_status: _s, ...rest } = part.front;
+    const front = { ...rest, label_status: label.status, ...label.label !== undefined ? { label: label.label } : {}, ...label.basis !== undefined ? { label_basis: label.basis } : {} };
+    if (canonical(front) === canonical(part.front))
+      continue;
+    const written = serializePart(front, part.blocks);
+    files.push({ path: part.path, text: written });
+    digests.set(part.index, fileDigest(written));
+  }
+  if (files.length === 0)
+    return { files, changed: 0 };
+  const data = text.manifest.data;
+  const pages = data.pages.map((e) => digests.has(Number(e.index)) ? { ...e, sha256: digests.get(Number(e.index)) } : e);
+  files.push({ path: text.manifest.path, text: serializeManifest({ ...data, pages, changed: stamp(actor, now) }, manifestBody(text.manifest.bytes)) });
+  return { files, changed: files.length - 1 };
+}
+function planSeal(corpus, id, actor, now, tools, note) {
+  if (actor.kind !== "person") {
+    throw new InvalidInput("Edits to source text are sealed by the person who made them: a language model or script does not correct source text. Record a suspected error with `review add --outcome flagged`.");
+  }
+  const text = loadedText(corpus, id);
+  const blocking = text.damage.filter((d) => d.code !== "part_edited");
+  if (blocking.length > 0)
+    throw new InvalidInput(`Sealing records edits only. Repair these first: ${blocking.map((d) => `${d.code} at ${d.path}`).join(", ")}.`);
+  const bad = corpus.partFiles.filter((f) => f.path.startsWith(`${text.directory}/`) && (f.state !== "ok" || f.problems.some((p) => p.reason === "record_invalid")));
+  if (bad.length > 0)
+    throw new InvalidInput(`These parts are not in the source file format, so nothing was sealed: ${bad.map((f) => f.path).join(", ")}.`);
+  const edited = text.damage.map((d) => Number(/index (\d+)/.exec(d.detail ?? "")?.[1]));
+  if (edited.length === 0)
+    return { files: [], edited, stale_reviews: [], stale_runs: [], changed_passages: [] };
+  const data = text.manifest.data;
+  const pages = data.pages.map((e) => ({ ...e, sha256: fileDigest(fileText(corpus, `${text.directory}/${String(e.file)}`)) }));
+  const conversion = data.conversion;
+  const added = `Edited by ${actor.name} on ${time(now).slice(0, 10)}${note ? `: ${note}` : "."}`;
+  const manifest = { ...data, pages, changed: stamp(actor, now), conversion: { ...conversion, note: [conversion.note, added].filter(Boolean).join(" ") } };
+  const sealed = { ...text, damage: [], usable: true };
+  const of = (kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+  const texts = new SourceTexts({ ...corpus, texts: new Map(corpus.texts).set(id, sealed) });
   return {
-    record,
-    text: encoded,
-    text_sha256: sha256(encoded),
-    method,
-    pages: spans?.length ?? 0,
-    empty,
-    unmapped: (spans ?? []).map((s) => s.page_index).filter((i) => !labels.has(i))
+    files: [{ path: text.manifest.path, text: serializeManifest(manifest, manifestBody(text.manifest.bytes)) }],
+    edited,
+    stale_reviews: of("text_review").filter((r) => r.data.text === id && !currentReview(r.data, sealed)).map((r) => idOf(r)),
+    stale_runs: of("comparison_run").filter((r) => r.data.text === id && !currentRun(r.data, sealed, tools)).map((r) => idOf(r)),
+    changed_passages: of("passage").filter((p) => p.data.text === id && textAt(texts, p.data).state === "changed").map((p) => idOf(p))
   };
 }
-function ranges(indexes) {
-  const out = [];
-  for (const i of indexes) {
-    const last = out.at(-1);
-    if (last && i === last[1] + 1)
-      last[1] = i;
-    else
-      out.push([i, i]);
+function planComparison(corpus, request) {
+  const text = loadedText(corpus, request.text);
+  if (!text.usable)
+    throw new InvalidInput("That source file is damaged. `check` explains why; repair it or seal your edit first.");
+  const view = viewOf(text);
+  const wanted = view.parts.filter((p) => request.method === "reconversion" || request.other.has(p.index));
+  if (wanted.length === 0)
+    throw new InvalidInput("The other text has no part in common with this source file.");
+  const pages = wanted.map((part) => {
+    const reading = request.method === "reconversion" ? asConverted(part.part.blocks) : part.streams.main;
+    const diff = diffWords(reading, request.other.get(part.index) ?? "");
+    return {
+      index: part.index,
+      sha256: comparedDigest(request.method, part.part.blocks),
+      agreement_permille: diff.words === 0 ? 1000 : Math.max(0, Math.floor(1000 * (diff.words - diff.differing) / diff.words)),
+      words: diff.words,
+      differing_words: diff.differing,
+      differences: diff.differences
+    };
+  });
+  const value = {
+    ...fresh("comparison_run", request.token, request.actor, request.now),
+    source: String(text.manifest.data.source),
+    text: request.text,
+    method: request.method,
+    independent: request.independent,
+    tools: request.tools,
+    against: request.against,
+    ...request.other_sha256 ? { other_sha256: request.other_sha256 } : {},
+    ...request.original_sha256 ? { original_sha256: request.original_sha256 } : {},
+    run: { at: request.now.toISOString(), by: { ...request.actor } },
+    pages
+  };
+  const written = record("comparison_run", value);
+  assertValid("ComparisonRun", "comparison_run", written.text);
+  const differing = pages.filter((p) => p.differing_words > 0);
+  return { record: written, parts: pages.length, differing: differing.map((p) => ({ index: p.index, differences: p.differences, differing_words: p.differing_words })) };
+}
+function planReview(corpus, request) {
+  const text = loadedText(corpus, request.text);
+  if (!text.usable)
+    throw new InvalidInput("That source file is damaged. `check` explains why; repair it or seal your edit first.");
+  if (request.actor.kind !== "person" && request.outcome !== "flagged") {
+    throw new InvalidInput("Only a person's review can say that text agrees, disagrees, or was corrected. A model or script records what it noticed with --outcome flagged.");
   }
-  return out.map(([a, b]) => a === b ? `${a}` : `${a}-${b}`).join(", ");
+  const source = String(text.manifest.data.source);
+  let indexes = request.pages;
+  if (request.passage !== undefined) {
+    const passage = corpus.byId.get(request.passage)?.data;
+    if (passage?.kind !== "passage" || passage.text !== request.text)
+      throw new InvalidInput(`${request.passage} is not a passage of this source file.`);
+    indexes = passage.anchor.map((a) => Number(a.index));
+  }
+  if (request.scope === "passage" && request.passage === undefined)
+    throw new InvalidInput("A passage review names its passage with --passage.");
+  if (indexes.length === 0)
+    throw new InvalidInput("Say which pages or sections were reviewed with --pages <indexes>.");
+  const pages = indexes.map((index) => {
+    const sha = reviewDigest(text, request.scope, index);
+    if (!sha)
+      throw new InvalidInput(`The source file has no part with index ${index}.`);
+    return { index, sha256: sha };
+  });
+  const value = {
+    ...fresh("text_review", request.token, request.actor, request.now),
+    source,
+    text: request.text,
+    scope: request.scope,
+    pages,
+    ...request.passage !== undefined ? { passage: request.passage } : {},
+    ...request.fields.length > 0 ? { fields: request.fields } : {},
+    against: request.against,
+    ...request.original_sha256 ? { original_sha256: request.original_sha256 } : {},
+    reviewed: stamp(request.actor, request.now),
+    outcome: request.outcome,
+    ...request.flags.length > 0 ? { flags: request.flags } : {},
+    ...request.note !== undefined ? { note: request.note } : {},
+    ...request.scope === "source_details" ? { source_record_sha256: sourceBinding(sourceRecord(corpus, source)) } : {}
+  };
+  const written = record("text_review", value);
+  assertValid("TextReview", "text_review", written.text);
+  return written;
+}
+// packages/core/src/lookups.ts
+var RESOLVERS = ["crossref", "internet_archive"];
+var resolverFor = (scheme) => scheme === "doi" ? "crossref" : scheme === "ia" ? "internet_archive" : undefined;
+function lookupAddress(resolver, value) {
+  if (resolver === "crossref") {
+    if (!/^10\.\d{4,9}\/\S+$/.test(value))
+      throw new InvalidInput(`${value} is not a DOI.`);
+    return `https://api.crossref.org/works/${encodeURIComponent(value)}`;
+  }
+  if (!/^[A-Za-z0-9_.-]+$/.test(value))
+    throw new InvalidInput(`${value} is not an Internet Archive item identifier.`);
+  return `https://archive.org/metadata/${value}/metadata`;
+}
+var KEPT = {
+  crossref: ["DOI", "title", "subtitle", "author", "editor", "issued", "published", "publisher", "container-title", "type", "volume", "issue", "page", "ISBN", "ISSN", "URL"],
+  internet_archive: ["identifier", "title", "creator", "date", "year", "publisher", "volume", "language", "call_number", "lccn", "oclc-id", "possible-copyright-status"]
+};
+var strings = (value) => (Array.isArray(value) ? value : value === undefined ? [] : [value]).filter((v) => typeof v === "string" && v.trim() !== "");
+function readFound(resolver, kept) {
+  const first = (name) => strings(kept[name])[0];
+  let title = first("title");
+  let contributors;
+  let issued;
+  let venue;
+  if (resolver === "crossref") {
+    const subtitle = first("subtitle");
+    if (title && subtitle)
+      title = `${title}: ${subtitle}`;
+    const people = [kept.author, kept.editor].find(Array.isArray);
+    contributors = (people ?? []).filter(isObject).map((p) => [p.given, p.family, p.name].filter((v) => typeof v === "string").join(" "));
+    const date = [kept.issued, kept.published].find(isObject);
+    const parts = date && Array.isArray(date["date-parts"]) ? date["date-parts"][0] : undefined;
+    issued = Array.isArray(parts) && typeof parts[0] === "number" ? String(parts[0]) : undefined;
+    venue = first("container-title");
+  } else {
+    contributors = strings(kept.creator);
+    issued = first("date") ?? first("year");
+  }
+  const publisher = first("publisher");
+  return {
+    ...title ? { title: title.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim() } : {},
+    contributors,
+    ...issued ? { issued } : {},
+    ...publisher ? { publisher } : {},
+    ...venue ? { venue } : {}
+  };
+}
+function readLookup(resolver, status, body) {
+  if (status === 404)
+    return { outcome: "not_found" };
+  let value;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(body));
+  } catch {
+    return { outcome: "error" };
+  }
+  if (!isObject(value))
+    return { outcome: "error" };
+  const whole = resolver === "crossref" ? value.message : value.result;
+  if (!isObject(whole) || strings(whole.title).length === 0)
+    return { outcome: "not_found" };
+  const kept = Object.fromEntries(KEPT[resolver].filter((k) => whole[k] !== undefined).map((k) => [k, whole[k]]));
+  const response = JSON.stringify(kept, Object.keys(flatten(kept)).sort(), 1);
+  parseJson(canonical({ response }));
+  return { outcome: "found", response, found: readFound(resolver, kept) };
+}
+function flatten(value, keys = {}) {
+  if (Array.isArray(value))
+    value.forEach((v) => flatten(v, keys));
+  else if (isObject(value)) {
+    for (const [k, v] of Object.entries(value)) {
+      keys[k] = true;
+      flatten(v, keys);
+    }
+  }
+  return keys;
+}
+function planResolution(request) {
+  const id = `${KINDS.resolution.prefix}${request.token()}`;
+  const at = request.now.toISOString().replace(/\.\d+Z$/, "Z");
+  const { lookup } = request;
+  return {
+    id,
+    path: recordPath("resolution", id),
+    text: canonical({
+      schema: RECORD_SCHEMA,
+      id,
+      kind: "resolution",
+      created: { at, by: { ...request.actor } },
+      source: request.source,
+      resolver: request.resolver,
+      identifier: { scheme: request.scheme, value: request.value },
+      query: request.value,
+      url: request.url,
+      queried_at: at,
+      outcome: lookup.outcome,
+      ...lookup.response ? { response: lookup.response, response_sha256: sha256(lookup.response) } : {},
+      ...lookup.found ? { found: lookup.found } : {}
+    })
+  };
 }
 // packages/core/src/excerpt.ts
 var EXCERPT_LIMITS = { pages: 5, characters: 30000, context: 300 };
-function finish(corpus, stored, others, requested, parts) {
+function finish(view, others, requested, parts) {
   const size = parts.reduce((sum, p) => sum + p.text.length, 0);
   if (size > EXCERPT_LIMITS.characters) {
     throw new InvalidInput(`That is ${size} characters, more than the excerpt limit of ${EXCERPT_LIMITS.characters}. Ask for fewer pages.`);
   }
-  const quality = isObject(stored.extraction.data.quality) ? stored.extraction.data.quality : {};
   let boundary = sha256(parts.map((p) => p.text).join("\f")).slice(0, 16);
   while (parts.some((p) => p.text.includes(boundary)))
     boundary = sha256(boundary).slice(0, 16);
-  return {
-    source: String(corpus.byId.get(String(stored.capture.data.source))?.data?.id ?? stored.capture.data.source),
-    extraction: idOf(stored.extraction),
-    capture: idOf(stored.capture),
-    requested,
-    method: stored.method,
-    quality: stored.level,
-    ...typeof quality.note === "string" ? { quality_note: quality.note } : {},
-    other_extractions: others,
-    parts,
-    boundary
-  };
+  return { source: view.source, source_text: view.id, requested, method: view.method, quality: view.level, other_source_texts: others, parts, boundary };
 }
 function wanted(range) {
-  const parts = locatorParts(range, undefined);
-  for (const part of parts) {
+  for (const part of locatorParts(range, undefined)) {
     const [a, b] = [numberOf(part.first), numberOf(part.last)];
     if (part.first !== part.last && a && b && b.value - a.value >= EXCERPT_LIMITS.pages) {
       throw new InvalidInput(`An excerpt is at most ${EXCERPT_LIMITS.pages} pages. A longer range is not an excerpt.`);
@@ -108711,71 +110565,56 @@ function wanted(range) {
   const labels = citedPages({ label: "page", value: range });
   if (!labels)
     throw new InvalidInput(`${range} is not a printed page or page range such as 89, 88-90 or ix.`);
-  if (labels.length > EXCERPT_LIMITS.pages) {
+  if (labels.length > EXCERPT_LIMITS.pages)
     throw new InvalidInput(`An excerpt is at most ${EXCERPT_LIMITS.pages} pages. A longer range is not an excerpt.`);
-  }
   return labels;
 }
-function excerptPages(corpus, blobs, source, range) {
+function excerptPages(corpus, source, range) {
   if (corpus.byId.get(source)?.data?.kind !== "source")
     throw new InvalidInput(`No readable source record has the ID ${source}.`);
   const labels = wanted(range);
-  const texts = new StoredTexts(corpus, blobs);
-  const all = texts.extractionsOf(source);
-  if (all.length === 0)
-    throw new InvalidInput(`The source ${source} has no stored copy with text. Add a copy and attach its text first.`);
-  const usable = all.map((e) => texts.of(e)).filter((t) => typeof t !== "string");
-  if (usable.length === 0)
-    throw new InvalidInput("The stored copy or text of this source is missing or does not match its digest. Run `store verify`.");
-  const pagesFor = (stored, label) => [...stored.labels].filter(([, l]) => l === label).map(([page]) => page);
-  const complete = usable.filter((t) => labels.every((l) => pagesFor(t, l).length > 0)).sort((a, b) => String(b.extraction.data.created?.at).localeCompare(String(a.extraction.data.created?.at)));
-  const stored = complete[0];
-  if (!stored) {
-    const missing = labels.filter((l) => !usable.some((t) => pagesFor(t, l).length > 0));
-    throw new InvalidInput(missing.length > 0 ? `No stored text maps printed page ${missing.join(", ")}. A page has a printed label only through the page map; see \`source pages\`.` : "No single stored text maps all the requested pages. Ask for them one at a time.");
+  const texts = new SourceTexts(corpus);
+  if (texts.idsOf(source).length === 0)
+    throw new InvalidInput(`The source ${source} has no source file. Capture its text first.`);
+  const { views } = texts.of(source);
+  if (views.length === 0)
+    throw new InvalidInput("The source file of this source is damaged. `check` explains why.");
+  const pagesFor = (view, label) => view.parts.filter((p) => p.label === label);
+  const created = (v) => String(v.loaded.manifest.data.created.at);
+  const complete = views.filter((v) => labels.every((l) => pagesFor(v, l).length > 0)).sort((a, b) => created(b).localeCompare(created(a)));
+  const view = complete[0];
+  if (!view) {
+    const missing = labels.filter((l) => !views.some((v) => pagesFor(v, l).length > 0));
+    throw new InvalidInput(missing.length > 0 ? `No source file labels printed page ${missing.join(", ")}. A page has a printed label only where one was established; a source with no pages is read by passage.` : "No single source file labels all the requested pages. Ask for them one at a time.");
   }
-  const parts = [];
-  for (const label of labels) {
-    const pages = pagesFor(stored, label);
-    for (const page_index of pages) {
-      const span = stored.spans.find((s) => s.page_index === page_index);
-      parts.push({
-        page_index,
-        printed_label: label,
-        heading: labelOf(stored, page_index),
-        text: stored.text.slice(stored.unit(span.start), stored.unit(span.end))
-      });
-    }
-  }
-  return finish(corpus, stored, complete.slice(1).map((t) => idOf(t.extraction)), `printed pages ${range}`, parts);
+  const parts = labels.flatMap((label) => pagesFor(view, label).flatMap((p) => [
+    { page_index: p.index, printed_label: label, heading: placeOf(view, p.index), text: p.streams.main },
+    ...p.streams.notes ? [{ page_index: p.index, printed_label: label, heading: `notes on ${placeOf(view, p.index)}`, text: p.streams.notes }] : []
+  ]));
+  return finish(view, complete.slice(1).map((v) => v.id), `printed pages ${range}`, parts);
 }
-function excerptPassage(corpus, blobs, passage) {
+function excerptPassage(corpus, passage) {
   const data = corpus.byId.get(passage)?.data;
   if (data?.kind !== "passage")
     throw new InvalidInput(`No readable passage record has the ID ${passage}.`);
   if (isRetired(data))
     throw new InvalidInput(`The passage ${passage} is retired.`);
-  const extraction = corpus.byId.get(String(data.extraction));
-  const stored = extraction?.data?.kind === "extraction" ? new StoredTexts(corpus, blobs).of(extraction) : "text_unusable";
-  if (typeof stored === "string" || data.text_sha256 !== stored.extraction.data.text_sha256) {
-    throw new InvalidInput("The stored text this passage was anchored in is missing, altered or not the one it names.");
+  const now = textAt(new SourceTexts(corpus), data);
+  if (now.state !== "ok" || !isObject(data.quote) || now.text !== data.quote.exact) {
+    throw new InvalidInput("The text at this passage's address is damaged or has changed. `check` explains why.");
   }
-  const position = isObject(data.position) ? data.position : undefined;
-  const exact = isObject(data.quote) ? String(data.quote.exact) : "";
-  let start = position ? stored.unit(Number(position.start)) : stored.text.indexOf(exact);
-  const end = position ? stored.unit(Number(position.end)) : start + exact.length;
-  if (start < 0 || end <= start || end > stored.text.length) {
-    throw new InvalidInput("The passage's place in the stored text cannot be found. `check` explains why.");
-  }
-  const before = stored.text.slice(Math.max(0, start - EXCERPT_LIMITS.context), start);
-  const after = stored.text.slice(end, end + EXCERPT_LIMITS.context);
-  const pages = stored.pagesOf(start, end);
-  return finish(corpus, stored, [], `passage ${passage}`, [
-    { heading: "context before", text: before },
-    { heading: `the passage (${pages.map((p) => labelOf(stored, p)).join("; ") || "no pages"})`, text: stored.text.slice(start, end) },
-    { heading: "context after", text: after }
+  const anchor = anchorsOf(data);
+  const [first, last] = [anchor[0], anchor.at(-1)];
+  const points = (index) => [...now.view.part(index).streams[now.stream]];
+  return finish(now.view, [], `passage ${passage}`, [
+    { heading: "context before", text: points(first.index).slice(Math.max(0, first.start - EXCERPT_LIMITS.context), first.start).join("") },
+    { heading: `the passage (${now.indexes.map((i) => placeOf(now.view, i)).join("; ")})`, text: now.text },
+    { heading: "context after", text: points(last.index).slice(last.end, last.end + EXCERPT_LIMITS.context).join("") }
   ]);
 }
+// packages/core/src/normalize.ts
+var normalizeText = (text) => text.replace(/^\ufeff/, "").replace(/\r\n?/g, `
+`);
 // packages/core/src/page-proposal.ts
 var PROPOSAL = { edge_lines: 3, widest_gap: 8, least_seen: 3, least_share: 0.5 };
 var labelFor = (style, value) => style === "arabic" ? String(value) : toRoman(value);
@@ -108893,6 +110732,25 @@ function parsePageNumbers(bytes) {
   }
   return out;
 }
+function autoSegments(proposal) {
+  const taken = new Set;
+  const kept = [];
+  const dropped = [];
+  for (const run of [...proposal.runs].sort((a, b) => b.seen - a.seen || a.segment.first_index - b.segment.first_index)) {
+    const { segment } = run;
+    const start = segment.style === "arabic" ? Number(segment.first_label) : fromRoman(segment.first_label);
+    const labels = Array.from({ length: segment.last_index - segment.first_index + 1 }, (_, i) => `${segment.style} ${start + i}`);
+    if (labels.some((l) => taken.has(l)))
+      dropped.push(segment);
+    else {
+      for (const label of labels)
+        taken.add(label);
+      kept.push(segment);
+    }
+  }
+  const order = (a, b) => a.first_index - b.first_index;
+  return { segments: kept.sort(order), dropped: dropped.sort(order) };
+}
 // packages/core/src/retire.ts
 function planRetire(corpus, request) {
   const { ids, reason, replaced_by } = request;
@@ -108919,13 +110777,1295 @@ function planRetire(corpus, request) {
       reason,
       ...replaced_by === undefined ? {} : { replaced_by }
     };
-    return { id, path: file.path, text: canonical({ ...file.data, retired }) };
+    const next = { ...file.data, retired };
+    if (file.data.kind !== "source_text")
+      return { id, path: file.path, text: canonical(next) };
+    const split = splitFrontMatter(new TextDecoder().decode(file.bytes));
+    return { id, path: file.path, text: serializeManifest(next, "problem" in split ? "" : split.body) };
+  });
+}
+// packages/core/src/research.ts
+var TITLE_LIMIT = 200;
+var dateOf = (path) => {
+  const found = /^(\d{4}-\d{2}-\d{2})-/.exec(path.slice(path.lastIndexOf("/") + 1))?.[1];
+  if (!found)
+    return;
+  const time = Date.parse(`${found}T00:00:00Z`);
+  return !Number.isNaN(time) && new Date(time).toISOString().startsWith(found) ? found : undefined;
+};
+var headingOf = (text) => {
+  let fence;
+  for (const line of text.split(/\r?\n/)) {
+    const mark = /^ {0,3}(```|~~~)/.exec(line)?.[1];
+    if (mark)
+      fence = fence === undefined ? mark : fence === mark ? undefined : fence;
+    else if (fence === undefined) {
+      const title = /^#[ \t]+(.*\S)/.exec(line)?.[1];
+      if (title)
+        return title;
+    }
+  }
+  return;
+};
+function researchIndex(corpus) {
+  return corpus.research.filter((file) => /\.md$/i.test(file.path)).sort((a, b) => compareCodePoints(a.path, b.path)).map((file) => {
+    const date = dateOf(file.path);
+    const note = { path: file.path, ...date ? { date } : {} };
+    let text;
+    try {
+      if (!file.bytes)
+        return { ...note, problem: "cannot_read" };
+      text = decodeUtf8(file.bytes);
+    } catch {
+      return { ...note, problem: "cannot_read" };
+    }
+    const title = headingOf(text.replace(/^\uFEFF/, ""));
+    if (title === undefined)
+      return note;
+    if (findCoordinates(title).length > 0)
+      return { ...note, problem: "title_withheld" };
+    return { ...note, title: Array.from(title).slice(0, TITLE_LIMIT).join("") };
   });
 }
 // packages/extract/src/index.ts
 import { existsSync } from "fs";
 import { dirname, join } from "path";
 
+// packages/extract/src/stamps.ts
+var STAMP_RULES_VERSION = "1";
+var ADDRESS = String.raw`(?:(?:\d{1,3}\.){3}\d{1,3}|(?:[0-9A-Fa-f]{0,4}:){2,7}[0-9A-Fa-f]{0,4})`;
+var DAY = String.raw`(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),\s+\d{1,2}\s+[A-Z][a-z]{2}\s+\d{4}`;
+var CLOCK = String.raw`\d{1,2}:\d{2}:\d{2}`;
+var MONTH = "(?:January|February|March|April|May|June|July|August|September|October|November|December)";
+var RULES = [
+  ["annual_reviews", new RegExp(String.raw`Downloaded\s+from\s+(?:https?://)?(?:www\.)?annualreviews\.org\.?[\s\S]{0,200}?\bIP:\s*${ADDRESS}\s+On:\s*${DAY}\s+${CLOCK}`, "g")],
+  ["jstor", new RegExp(String.raw`This\s+content\s+downloaded\s+from\s+${ADDRESS}\s+on\s+${DAY},?\s+${CLOCK}(?:\s*(?:AM|PM))?\s+(?:UTC|GMT|\+00:00)(?:\s*All\s+use\s+subject\s+to\s+(?:https?://about\.jstor\.org/terms|JSTOR\s+Terms\s+and\s+Conditions))?`, "g")],
+  ["taylor_francis", new RegExp(String.raw`Downloaded\s+by\s+\[[^\]]{1,200}\]\s+at\s+\d{1,2}:\d{2}\s+\d{1,2}\s+${MONTH}\s+\d{4}`, "g")],
+  ["wiley", new RegExp(String.raw`Downloaded\s+from\s+https?://onlinelibrary\.wiley\.com/\S+\s+by\s+[\s\S]{1,300}?,\s*Wiley\s+Online\s+Library\s+on\s+\[\d{1,2}/\d{1,2}/\d{4}\]\.(?:\s*See\s+the\s+Terms\s+and\s+Conditions)?`, "g")]
+];
+function stampSpans(text) {
+  const found = RULES.flatMap(([rule, form]) => [...text.matchAll(form)].map((m) => ({ start: m.index, end: m.index + m[0].length, rule })));
+  return found.sort((a, b) => a.start - b.start || b.end - a.end).filter((s, i, all) => !all.slice(0, i).some((o) => s.start < o.end));
+}
+var removals = (rules) => [...new Set(rules)].sort().map((rule) => ({ kind: "download_stamp", rule, rules_version: STAMP_RULES_VERSION }));
+function removeStamps(text) {
+  const spans = stampSpans(text);
+  let out = "";
+  let at = 0;
+  for (const span of spans) {
+    out += text.slice(at, span.start);
+    at = span.end;
+  }
+  return { text: out + text.slice(at), rules: spans.map((s) => s.rule) };
+}
+function removeFromPieces(pieces) {
+  const spans = stampSpans(pieces.map((p) => p.text + p.after).join(""));
+  let offset = 0;
+  const texts = pieces.map((piece) => {
+    const from = offset;
+    offset += piece.text.length + piece.after.length;
+    let out = "";
+    let at = 0;
+    for (const span of spans) {
+      const start = Math.max(0, Math.min(piece.text.length, span.start - from));
+      const end = Math.max(0, Math.min(piece.text.length, span.end - from));
+      if (end <= start)
+        continue;
+      out += piece.text.slice(at, start);
+      at = end;
+    }
+    return out + piece.text.slice(at);
+  });
+  return { texts, rules: spans.map((s) => s.rule) };
+}
+
+// packages/extract/src/markup.ts
+var NAMED = {
+  amp: "&",
+  lt: "<",
+  gt: ">",
+  quot: '"',
+  apos: "'",
+  nbsp: "\xA0",
+  shy: "\xAD",
+  mdash: "\u2014",
+  ndash: "\u2013",
+  hellip: "\u2026",
+  lsquo: "\u2018",
+  rsquo: "\u2019",
+  sbquo: "\u201A",
+  ldquo: "\u201C",
+  rdquo: "\u201D",
+  bdquo: "\u201E",
+  laquo: "\xAB",
+  raquo: "\xBB",
+  copy: "\xA9",
+  reg: "\xAE",
+  trade: "\u2122",
+  sect: "\xA7",
+  para: "\xB6",
+  deg: "\xB0",
+  times: "\xD7",
+  divide: "\xF7",
+  plusmn: "\xB1",
+  middot: "\xB7",
+  bull: "\u2022",
+  dagger: "\u2020",
+  Dagger: "\u2021",
+  prime: "\u2032",
+  Prime: "\u2033",
+  frac12: "\xBD",
+  frac14: "\xBC",
+  frac34: "\xBE",
+  pound: "\xA3",
+  euro: "\u20AC",
+  cent: "\xA2",
+  yen: "\xA5",
+  thinsp: "\u2009",
+  ensp: "\u2002",
+  emsp: "\u2003",
+  aelig: "\xE6",
+  AElig: "\xC6",
+  oelig: "\u0153",
+  OElig: "\u0152",
+  szlig: "\xDF",
+  agrave: "\xE0",
+  aacute: "\xE1",
+  acirc: "\xE2",
+  atilde: "\xE3",
+  auml: "\xE4",
+  aring: "\xE5",
+  ccedil: "\xE7",
+  egrave: "\xE8",
+  eacute: "\xE9",
+  ecirc: "\xEA",
+  euml: "\xEB",
+  igrave: "\xEC",
+  iacute: "\xED",
+  icirc: "\xEE",
+  iuml: "\xEF",
+  ntilde: "\xF1",
+  ograve: "\xF2",
+  oacute: "\xF3",
+  ocirc: "\xF4",
+  otilde: "\xF5",
+  ouml: "\xF6",
+  oslash: "\xF8",
+  ugrave: "\xF9",
+  uacute: "\xFA",
+  ucirc: "\xFB",
+  uuml: "\xFC",
+  yacute: "\xFD",
+  Eacute: "\xC9",
+  Auml: "\xC4",
+  Ouml: "\xD6",
+  Uuml: "\xDC",
+  minus: "\u2212",
+  larr: "\u2190",
+  rarr: "\u2192",
+  iexcl: "\xA1"
+};
+var decodeReferences = (text) => text.replace(/&(#x[0-9a-fA-F]{1,6}|#\d{1,7}|[A-Za-z][A-Za-z0-9]{1,10});/g, (whole, name) => {
+  if (name[0] !== "#")
+    return Object.hasOwn(NAMED, name) ? NAMED[name] : whole;
+  const code = name[1] === "x" ? parseInt(name.slice(2), 16) : Number(name.slice(1));
+  return code > 0 && code <= 1114111 && !(code >= 55296 && code <= 57343) ? String.fromCodePoint(code) : "\uFFFD";
+});
+var RAW = new Set(["script", "style"]);
+function* tokens(source) {
+  let at = 0;
+  const length = source.length;
+  while (at < length) {
+    const next = source.indexOf("<", at);
+    if (next < 0) {
+      yield { type: "text", text: decodeReferences(source.slice(at)) };
+      return;
+    }
+    if (next > at)
+      yield { type: "text", text: decodeReferences(source.slice(at, next)) };
+    const skip = (until) => {
+      const end = source.indexOf(until, next);
+      at = end < 0 ? length : end + until.length;
+    };
+    if (source.startsWith("<!--", next))
+      skip("-->");
+    else if (source.startsWith("<![CDATA[", next)) {
+      const end = source.indexOf("]]>", next);
+      yield { type: "text", text: source.slice(next + 9, end < 0 ? length : end) };
+      at = end < 0 ? length : end + 3;
+    } else if (source.startsWith("<!", next) || source.startsWith("<?", next))
+      skip(">");
+    else {
+      const tag = /<(\/?)([A-Za-z][^\s/>]*)((?:"[^"]*"|'[^']*'|[^"'>])*)>/y;
+      tag.lastIndex = next;
+      const found = tag.exec(source);
+      if (!found) {
+        yield { type: "text", text: "<" };
+        at = next + 1;
+        continue;
+      }
+      at = tag.lastIndex;
+      const name = found[2].toLowerCase();
+      if (found[1])
+        yield { type: "close", name };
+      else {
+        const attrs = Object.create(null);
+        for (const [, key, a, b, c] of found[3].matchAll(/([^\s=/"']+)(?:\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g)) {
+          attrs[key.toLowerCase()] = decodeReferences(a ?? b ?? c ?? "");
+        }
+        const closed = /\/\s*$/.test(found[3]);
+        yield { type: "open", name, attrs, closed };
+        if (RAW.has(name) && !closed) {
+          const end = source.toLowerCase().indexOf(`</${name}`, at);
+          at = end < 0 ? length : end;
+        }
+      }
+    }
+  }
+}
+var VOID = new Set(["area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source", "track", "wbr"]);
+function tree(source, html = false) {
+  const root = { name: "#root", attrs: {}, children: [] };
+  const stack = [root];
+  for (const token of tokens(source)) {
+    const top = stack.at(-1);
+    if (token.type === "text")
+      top.children.push(token.text);
+    else if (token.type === "open") {
+      if (html && (token.name === "p" || token.name === "li") && stack.at(-1).name === token.name)
+        stack.pop();
+      const element = { name: token.name, attrs: token.attrs, children: [] };
+      stack.at(-1).children.push(element);
+      if (!token.closed && !(html && VOID.has(token.name)) && stack.length < 200)
+        stack.push(element);
+    } else {
+      const index = stack.map((e) => e.name).lastIndexOf(token.name);
+      if (index > 0)
+        stack.length = index;
+    }
+  }
+  return root;
+}
+function* elements(node) {
+  for (const child of node.children) {
+    if (typeof child !== "string") {
+      yield child;
+      yield* elements(child);
+    }
+  }
+}
+var textOf2 = (node) => node.children.map((c) => typeof c === "string" ? c : textOf2(c)).join("");
+var localName = (name) => name.slice(name.indexOf(":") + 1);
+var find = (node, name) => [...elements(node)].filter((e) => localName(e.name) === name);
+
+// packages/extract/src/model.ts
+class Unconvertible extends Error {
+}
+var CONVERTER_VERSION = "1";
+var converterTool = { name: "stemma-convert", version: CONVERTER_VERSION };
+var block = (role, content, more = {}) => ({ role, content, ...more });
+var textBlock = (role, text, more = {}) => block(role, encodeText(text), more);
+var cleanText = (text) => text.replace(/\r\n?/g, `
+`).replace(/[\u0000-\u0008\u000b\u000e-\u001f\u007f]/g, " ").replace(/\ufeff/g, "");
+var CHAPTER = /^(?:chapter|chap\.)\s+([ivxlc]+|\d{1,3}|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b/i;
+var chapterOf = (heading) => CHAPTER.exec(heading.trim())?.[1];
+
+class PartBuilder {
+  pages;
+  drafts = [{ blocks: [] }];
+  paged = false;
+  chapter;
+  constructor(pages) {
+    this.pages = pages;
+  }
+  get current() {
+    return this.drafts.at(-1);
+  }
+  newSection() {
+    if (!this.pages && this.current.blocks.length > 0)
+      this.drafts.push({ blocks: [], ...this.chapter ? { chapter: this.chapter } : {} });
+  }
+  pageBreak(label) {
+    if (!this.pages)
+      return;
+    this.paged = true;
+    this.drafts.push({ blocks: [], label });
+  }
+  heading(content, plain) {
+    const level = Number(content.level ?? 2);
+    if (level <= 2) {
+      this.newSection();
+      const chapter = chapterOf(plain);
+      if (chapter)
+        this.chapter = chapter;
+      else if (level === 1)
+        this.chapter = undefined;
+      if (!this.pages) {
+        this.current.section ??= plain;
+        if (this.chapter)
+          this.current.chapter = this.chapter;
+        else
+          delete this.current.chapter;
+      }
+    }
+    this.add(content);
+  }
+  add(content) {
+    if (content.content.trim() !== "")
+      this.current.blocks.push(content);
+  }
+  build(undetermined = []) {
+    const drafts = this.drafts.filter((d, i) => d.blocks.length > 0 || this.paged && i > 0);
+    if (!drafts.some((d) => d.blocks.length > 0))
+      throw new Unconvertible("There is no machine-readable text in it.");
+    return {
+      paged: this.paged,
+      parts: drafts.map((d, index) => ({
+        index,
+        label: !this.paged ? { status: "unpaged" } : d.label !== undefined ? { status: "labelled", label: d.label, basis: "source_marker" } : { status: "undetermined" },
+        ...d.section && !this.paged ? { section: d.section } : {},
+        ...d.chapter && !this.paged ? { chapter: d.chapter } : {},
+        columns: "1",
+        undetermined,
+        blocks: d.blocks
+      }))
+    };
+  }
+}
+
+// packages/extract/src/zip.ts
+import { inflateRawSync } from "zlib";
+var ZIP_LIMITS = { entries: 20000, entry_bytes: 100 * 1024 * 1024, total_bytes: 400 * 1024 * 1024 };
+function readZip(bytes, limits = ZIP_LIMITS) {
+  const data = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const bad = (why) => {
+    throw new Unconvertible(`The container is damaged or not supported: ${why}.`);
+  };
+  let end = -1;
+  for (let i = data.length - 22;i >= Math.max(0, data.length - 65557); i--) {
+    if (data.readUInt32LE(i) === 101010256) {
+      end = i;
+      break;
+    }
+  }
+  if (end < 0)
+    bad("no directory");
+  const count = data.readUInt16LE(end + 10);
+  if (count > limits.entries)
+    bad("too many entries");
+  let at = data.readUInt32LE(end + 16);
+  const entries = new Map;
+  for (let i = 0;i < count; i++) {
+    if (at + 46 > data.length || data.readUInt32LE(at) !== 33639248)
+      bad("a broken directory entry");
+    const [flags, method, packed, size] = [data.readUInt16LE(at + 8), data.readUInt16LE(at + 10), data.readUInt32LE(at + 20), data.readUInt32LE(at + 24)];
+    const [nameLength, extra, comment, local] = [data.readUInt16LE(at + 28), data.readUInt16LE(at + 30), data.readUInt16LE(at + 32), data.readUInt32LE(at + 42)];
+    const name = data.toString("utf8", at + 46, at + 46 + nameLength);
+    if (local + 30 > data.length || data.readUInt32LE(local) !== 67324752)
+      bad("a broken entry");
+    const start = local + 30 + data.readUInt16LE(local + 26) + data.readUInt16LE(local + 28);
+    entries.set(name, { method, size, start, packed, encrypted: (flags & 1) === 1 });
+    at += 46 + nameLength + extra + comment;
+  }
+  let total = 0;
+  return {
+    names: [...entries.keys()],
+    text(name) {
+      const entry = entries.get(name);
+      if (!entry)
+        return;
+      if (entry.encrypted)
+        bad("it is encrypted");
+      if (entry.size > limits.entry_bytes)
+        bad("an entry is over the size limit");
+      const packed = data.subarray(entry.start, entry.start + entry.packed);
+      let raw;
+      try {
+        raw = entry.method === 0 ? packed : entry.method === 8 ? inflateRawSync(packed, { maxOutputLength: limits.entry_bytes }) : bad("an unknown compression");
+      } catch (error) {
+        if (error instanceof Unconvertible)
+          throw error;
+        return bad("an entry cannot be expanded or passes the size limit");
+      }
+      total += raw.length;
+      if (total > limits.total_bytes)
+        bad("it expands past the size limit");
+      try {
+        return new TextDecoder("utf-8", { fatal: true }).decode(raw);
+      } catch {
+        return bad("an entry is not UTF-8");
+      }
+    }
+  };
+}
+
+// packages/extract/src/docx.ts
+var SKIPPED = new Set(["w:del", "w:deltext", "w:instrtext", "w:movefrom", "w:ppr", "w:rpr"]);
+var child = (node, name) => node.children.find((c) => typeof c !== "string" && c.name === name);
+function convertDocx(bytes) {
+  const zip = readZip(bytes);
+  const main = zip.text("word/document.xml");
+  if (!main)
+    throw new Unconvertible("The DOCX has no document part.");
+  const noteTexts = (part, element) => {
+    const xml = zip.text(part);
+    return new Map((xml ? find(tree(xml), element) : []).filter((e) => !e.attrs["w:type"]).map((e) => [e.attrs["w:id"], e]));
+  };
+  const footnotes = noteTexts("word/footnotes.xml", "footnote");
+  const endnotes = noteTexts("word/endnotes.xml", "endnote");
+  const builder = new PartBuilder(false);
+  const notes = [];
+  let figures = [];
+  let number = 0;
+  const phrase = (node) => node.children.map((c) => {
+    if (typeof c === "string" || SKIPPED.has(c.name))
+      return "";
+    if (c.name === "w:t")
+      return encodeText(cleanText(textOf2(c)));
+    if (c.name === "w:tab")
+      return " ";
+    if (c.name === "w:br" || c.name === "w:cr")
+      return c.attrs["w:type"] === "page" ? "" : `
+`;
+    if (c.name === "w:nobreakhyphen")
+      return "-";
+    if (c.name === "w:softhyphen")
+      return "\xAD";
+    if (c.name === "w:footnotereference" || c.name === "w:endnotereference") {
+      const note = (c.name === "w:footnotereference" ? footnotes : endnotes).get(c.attrs["w:id"]);
+      if (!note)
+        return "";
+      const label = String(++number);
+      const content = find(note, "p").map(phrase).join(`
+`).trim();
+      notes.push(block("footnote", content, { label, basis: "markup" }));
+      return inline("fnref", { label }, label);
+    }
+    if (c.name === "wp:docpr") {
+      const described = (c.attrs.descr ?? "").trim();
+      figures.push(textBlock("figure", described ? `Image with the alternative text: ${described}` : "Image with no alternative text.", { by: "software:stemma-convert", basis: "markup" }));
+      return "";
+    }
+    return phrase(c);
+  }).join("");
+  const paragraph = (p) => {
+    const properties = child(p, "w:ppr");
+    const style = (properties && child(properties, "w:pstyle")?.attrs["w:val"]) ?? "";
+    const content = phrase(p).trim();
+    const heading = /^heading\s?([1-6])$/i.exec(style)?.[1] ?? (/^title$/i.test(style) ? "1" : undefined);
+    if (content) {
+      if (heading)
+        builder.heading(block("heading", content, { level: heading, basis: "markup" }), textOf2(p).trim());
+      else {
+        const role = /quote/i.test(style) ? "blockquote" : /caption/i.test(style) ? "caption" : properties && child(properties, "w:numpr") ? "list-item" : "paragraph";
+        builder.add(block(role, content, { basis: "markup" }));
+      }
+    }
+    for (const figure of figures.splice(0))
+      builder.add(figure);
+    for (const note of notes.splice(0))
+      builder.add(note);
+  };
+  const walk = (node) => {
+    for (const c of node.children) {
+      if (typeof c === "string" || SKIPPED.has(c.name))
+        continue;
+      if (c.name === "w:p")
+        paragraph(c);
+      else if (c.name === "w:tbl") {
+        const rows = find(c, "tr").map((tr) => `| ${tr.children.filter((x) => typeof x !== "string" && localName(x.name) === "tc").map((tc) => find(tc, "p").map(phrase).join(" ").trim().replace(/\n/g, " ").replace(/\|/g, "\\|")).join(" | ")} |`);
+        builder.add(block("table", rows.join(`
+`), { basis: "markup" }));
+        for (const note of notes.splice(0))
+          builder.add(note);
+      } else
+        walk(c);
+    }
+  };
+  walk(tree(main));
+  const core = zip.text("docProps/core.xml");
+  const properties = core ? tree(core) : undefined;
+  const stated = (name) => properties ? find(properties, name).map((e) => textOf2(e).trim()).find(Boolean) : undefined;
+  const [title, creator, created] = [stated("title"), stated("creator"), stated("created")];
+  const identity = {
+    ...title ? { title } : {},
+    ...creator ? { contributors: [creator] } : {},
+    ...title || creator ? { basis: `the DOCX core properties${created ? `; file created ${created}` : ""}` } : {}
+  };
+  return {
+    ...builder.build(),
+    coverage: "all",
+    identity,
+    method: "markup",
+    tools: [converterTool],
+    notes: ["A DOCX has no fixed pages, so none are numbered. Tracked deletions and field codes are left out."]
+  };
+}
+
+// packages/extract/src/epub.ts
+import { posix } from "path";
+
+// packages/extract/src/html.ts
+var SKIP = new Set(["script", "style", "noscript", "template", "head", "iframe", "object", "svg", "form", "button", "select"]);
+var CONTAINERS = new Set(["#root", "html", "body", "div", "section", "article", "main", "header", "footer", "aside", "nav", "figure", "ul", "ol", "dl"]);
+var BLOCKS = {
+  p: "paragraph",
+  blockquote: "blockquote",
+  li: "list-item",
+  dt: "paragraph",
+  dd: "paragraph",
+  pre: "paragraph",
+  figcaption: "caption",
+  caption: "caption"
+};
+var tokensOf = (value) => (value ?? "").split(/\s+/).filter(Boolean);
+var has = (e, attr, ...values) => tokensOf(e.attrs[attr]).some((t) => values.includes(t));
+var isBoilerplate = (e) => /^pg-(header|footer|machine-header)$/.test(e.attrs.id ?? "") || has(e, "class", "pg-boilerplate", "pgheader", "pgfooter");
+var isPageMarker = (e) => has(e, "epub:type", "pagebreak") || e.attrs.role === "doc-pagebreak" || has(e, "class", "pagenum", "pageno", "page-number");
+var isNoteBody = (e) => has(e, "epub:type", "footnote", "endnote", "rearnote") || e.attrs.role === "doc-footnote" || has(e, "class", "footnote", "footnote-item");
+var isNoteRef = (e) => e.name === "a" && (has(e, "epub:type", "noteref") || e.attrs.role === "doc-noteref" || has(e, "class", "footnote-ref", "fnanchor", "noteref"));
+var markerLabel = (e) => {
+  const stated = e.attrs.title ?? e.attrs["aria-label"] ?? textOf2(e);
+  return stated.replace(/[[\]{}()]/g, " ").replace(/\b(?:pg|page|p)\b\.?/gi, " ").trim();
+};
+var squeeze = (text) => text.replace(/[ \t\n\r\f]+/g, " ");
+function phrase(node, onPage, figures) {
+  let out = "";
+  for (const child of node.children) {
+    if (typeof child === "string")
+      out += encodeText(squeeze(cleanText(child)));
+    else if (SKIP.has(child.name))
+      continue;
+    else if (child.name === "br")
+      out += `
+`;
+    else if (child.name === "img")
+      figures.push(figureOf(child));
+    else if (isPageMarker(child))
+      onPage(markerLabel(child));
+    else if (isNoteRef(child)) {
+      const text = squeeze(textOf2(child)).trim();
+      const label = text.replace(/^\[|\]$/g, "");
+      out += inline("fnref", { label }, encodeText(text));
+    } else
+      out += phrase(child, onPage, figures);
+  }
+  return out;
+}
+var figureOf = (image) => {
+  const alt = squeeze(cleanText(image.attrs.alt ?? "")).trim();
+  return textBlock("figure", alt ? `Image with the alternative text: ${alt}` : "Image with no alternative text.", { by: "software:stemma-convert", basis: "markup" });
+};
+var tidy = (content) => content.split(`
+`).map((l) => l.trim()).join(`
+`).trim();
+function walkHtml(document2, builder) {
+  let loose = [];
+  let figures = [];
+  const pending = [];
+  const onPage = (label) => {
+    if (label)
+      pending.push(label);
+  };
+  const breakNow = () => {
+    for (const label of pending.splice(0))
+      builder.pageBreak(label);
+  };
+  const emit = (content, plain) => {
+    if (content.role === "heading")
+      builder.heading(content, plain);
+    else
+      builder.add(content);
+    for (const figure of figures.splice(0))
+      builder.add(figure);
+  };
+  const flush = (role) => {
+    const content = tidy(loose.join(""));
+    loose = [];
+    if (content)
+      emit(block(role, content, { basis: "markup" }));
+    breakNow();
+  };
+  const walk = (node, role) => {
+    for (const child of node.children) {
+      if (typeof child === "string") {
+        if (child.trim() !== "" || loose.length > 0)
+          loose.push(encodeText(squeeze(cleanText(child))));
+        continue;
+      }
+      if (SKIP.has(child.name))
+        continue;
+      if (isBoilerplate(child)) {
+        flush(role);
+        const text = tidy(phrase(child, () => {}, []));
+        if (text)
+          emit(block("boilerplate", text, { basis: "markup" }));
+      } else if (isPageMarker(child)) {
+        flush(role);
+        onPage(markerLabel(child));
+        breakNow();
+      } else if (isNoteBody(child)) {
+        flush(role);
+        const text = tidy(phrase(child, onPage, figures));
+        const first = /^\[?([0-9]{1,4}|[*\u2020\u2021\u00A7])\]?[.:)]?\s/.exec(text)?.[1] ?? find(child, "a").map((a) => squeeze(textOf2(a)).trim().replace(/^\[|\]$/g, "")).find(Boolean);
+        emit(block("footnote", text, { ...first ? { label: first } : {}, basis: "markup" }));
+      } else if (/^h[1-6]$/.test(child.name)) {
+        flush(role);
+        const content = tidy(phrase(child, onPage, figures));
+        breakNow();
+        if (content)
+          emit(block("heading", content, { level: child.name.slice(1), basis: "markup" }), squeeze(textOf2(child)).trim());
+      } else if (child.name === "table") {
+        flush(role);
+        for (const caption of find(child, "caption"))
+          emit(block("caption", tidy(phrase(caption, onPage, figures)), { basis: "markup" }));
+        const rows = find(child, "tr").map((tr) => `| ${tr.children.filter((c) => typeof c !== "string" && (c.name === "td" || c.name === "th")).map((c) => tidy(phrase(c, onPage, figures)).replace(/\n/g, " ").replace(/\|/g, "\\|")).join(" | ")} |`);
+        emit(block("table", rows.join(`
+`), { basis: "markup" }));
+        breakNow();
+      } else if (Object.hasOwn(BLOCKS, child.name)) {
+        flush(role);
+        const mine = BLOCKS[child.name];
+        if ([...elements(child)].some((e) => Object.hasOwn(BLOCKS, e.name))) {
+          walk(child, mine);
+          flush(mine);
+        } else {
+          loose.push(phrase(child, onPage, figures));
+          flush(mine === "paragraph" ? role : mine);
+        }
+      } else if (CONTAINERS.has(child.name)) {
+        flush(role);
+        walk(child, role);
+        flush(role);
+      } else if (child.name === "img")
+        figures.push(figureOf(child));
+      else if (child.name === "br")
+        loose.push(`
+`);
+      else if (isNoteRef(child) || child.name === "a" || child.name === "sup" || child.name === "span" || child.name === "em" || child.name === "i" || child.name === "b" || child.name === "strong") {
+        loose.push(phrase({ name: "#inline", attrs: {}, children: [child] }, onPage, figures));
+      } else
+        walk(child, role);
+    }
+  };
+  walk(document2, "paragraph");
+  flush("paragraph");
+  for (const figure of figures.splice(0))
+    builder.add(figure);
+}
+var hasPageMarkers = (document2) => [...elements(document2)].some((e) => isPageMarker(e) && markerLabel(e) !== "");
+function htmlIdentity(document2) {
+  const meta = new Map;
+  for (const element of find(document2, "meta")) {
+    const name = (element.attrs.name ?? element.attrs.property ?? "").toLowerCase();
+    if (name && element.attrs.content)
+      meta.set(name, [...meta.get(name) ?? [], squeeze(element.attrs.content).trim()]);
+  }
+  const first = (...names) => names.map((n) => meta.get(n)?.[0]).find(Boolean);
+  const title = first("citation_title", "dc.title", "dcterms.title", "og:title") ?? (squeeze(find(document2, "title").map(textOf2)[0] ?? "").trim() || undefined);
+  const contributors = ["citation_author", "dc.creator", "dcterms.creator", "author"].map((n) => meta.get(n)).find(Boolean);
+  const doi = first("citation_doi", "dc.identifier.doi");
+  const issued = first("citation_publication_date", "dc.date", "dcterms.date");
+  const venue = first("citation_journal_title");
+  const publisher = first("citation_publisher", "dc.publisher");
+  const found = {
+    ...title ? { title } : {},
+    ...contributors ? { contributors } : {},
+    ...issued ? { issued } : {},
+    ...venue ? { venue } : {},
+    ...publisher ? { publisher } : {},
+    ...doi ? { identifiers: [{ scheme: "doi", value: doi }] } : {}
+  };
+  return Object.keys(found).length > 0 ? { ...found, basis: "the document's title and meta elements" } : {};
+}
+function convertHtml(source) {
+  const document2 = tree(source, true);
+  const builder = new PartBuilder(hasPageMarkers(document2));
+  walkHtml(document2, builder);
+  const built = builder.build();
+  return {
+    ...built,
+    coverage: "all",
+    identity: htmlIdentity(document2),
+    method: "markup",
+    tools: [converterTool],
+    notes: ["Images are described by their alternative text; scripts, styles and linked files were neither run nor fetched."]
+  };
+}
+
+// packages/extract/src/epub.ts
+function convertEpub(bytes) {
+  const zip = readZip(bytes);
+  const container = zip.text("META-INF/container.xml");
+  const rootPath = container && find(tree(container), "rootfile")[0]?.attrs["full-path"];
+  const packageText = rootPath ? zip.text(rootPath) : undefined;
+  if (!rootPath || !packageText)
+    throw new Unconvertible("The EPUB has no package document.");
+  const document2 = tree(packageText);
+  const metadata = (name) => [...elements(document2)].filter((e) => e.name === `dc:${name}`).map((e) => textOf2(e).trim()).filter(Boolean);
+  const items = new Map(find(document2, "item").map((e) => [e.attrs.id, e.attrs]));
+  const chapters = find(document2, "itemref").flatMap((ref) => {
+    const item = items.get(ref.attrs.idref);
+    if (!item?.href || (item.properties ?? "").split(/\s+/).includes("nav"))
+      return [];
+    const path = posix.join(posix.dirname(rootPath), decodeURIComponent(item.href.split("#")[0]));
+    const text = zip.text(path);
+    if (text === undefined)
+      throw new Unconvertible("The EPUB's reading order names a document it does not hold.");
+    return [tree(text, true)];
+  });
+  if (chapters.length === 0)
+    throw new Unconvertible("The EPUB has no documents in its reading order.");
+  const builder = new PartBuilder(chapters.some(hasPageMarkers));
+  for (const chapter of chapters) {
+    builder.newSection();
+    walkHtml(find(chapter, "body")[0] ?? chapter, builder);
+  }
+  const identifiers = metadata("identifier").flatMap((value) => {
+    const isbn = /(?:isbn[: ]*)?(97[89][-0-9]{10,14}|\d{9}[\dXx])$/i.exec(value);
+    const doi = /(10\.\d{4,9}\/\S+)$/.exec(value);
+    const gutenberg = /gutenberg\.org\/(?:ebooks\/)?(\d+)$/.exec(value);
+    return doi ? [{ scheme: "doi", value: doi[1] }] : gutenberg ? [{ scheme: "gutenberg", value: gutenberg[1] }] : isbn ? [{ scheme: "isbn", value: isbn[1] }] : [{ scheme: "uri", value }];
+  });
+  const [title] = metadata("title");
+  const identity = {
+    ...title ? { title } : {},
+    ...metadata("creator").length > 0 ? { contributors: metadata("creator") } : {},
+    ...metadata("date")[0] ? { issued: metadata("date")[0] } : {},
+    ...metadata("publisher")[0] ? { publisher: metadata("publisher")[0] } : {},
+    ...identifiers.length > 0 ? { identifiers } : {},
+    basis: "the EPUB package document"
+  };
+  return {
+    ...builder.build(),
+    coverage: "all",
+    identity,
+    method: "markup",
+    tools: [converterTool],
+    notes: ["Images are described by their alternative text and stay with the original."]
+  };
+}
+
+// packages/extract/src/text.ts
+var START = /^\*\*\* ?START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\n]*$/im;
+var END = /^\*\*\* ?END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\n]*$/im;
+function gutenbergHeader(header) {
+  const fields = new Map;
+  let last;
+  for (const line of header.split(`
+`)) {
+    const field = /^(Title|Author|Editor|Translator|Illustrator|Release date|Release Date|Most recently updated|Language|Credits|Original publication)\s*:\s*(.*)$/i.exec(line);
+    if (field) {
+      last = field[1].toLowerCase();
+      fields.set(last, field[2].trim());
+    } else if (last && /^\s+\S/.test(line))
+      fields.set(last, `${fields.get(last)} ${line.trim()}`.trim());
+    else
+      last = undefined;
+  }
+  const release = fields.get("release date");
+  const number = /\[\s*e(?:book|text)\s*#\s*(\d+)\s*\]/i.exec(header)?.[1];
+  const people = ["author", "editor", "translator", "illustrator"].flatMap((f) => fields.get(f) ? [fields.get(f)] : []);
+  const title = fields.get("title");
+  const released = release?.replace(/\s*\[.*$/, "").trim();
+  const version = [released ? `Released ${released}` : "", fields.get("most recently updated") ? `most recently updated ${fields.get("most recently updated")}` : ""].filter(Boolean).join("; ");
+  return {
+    identity: {
+      ...title ? { title } : {},
+      ...people.length > 0 ? { contributors: people } : {},
+      ...number ? { identifiers: [{ scheme: "gutenberg", value: number }] } : {},
+      basis: "the Project Gutenberg header in the file"
+    },
+    ...version ? { version } : {},
+    notes: [
+      ...fields.get("credits") ? [`Credits stated by the library: ${fields.get("credits")}`] : [],
+      ...fields.get("language") ? [`Language stated by the library: ${fields.get("language")}`] : [],
+      ...fields.get("original publication") ? [`Original publication as the library states it: ${fields.get("original publication")}`] : []
+    ]
+  };
+}
+var paragraphs = (text) => text.split(/\n[ \t]*\n/).map((p) => p.replace(/^\n+|\s+$/g, "")).filter((p) => p.trim() !== "");
+function convertText(input) {
+  const text = cleanText(input);
+  if (!/\S/u.test(text))
+    throw new Unconvertible("There is no machine-readable text: it is empty or only white space.");
+  const start = START.exec(text);
+  const end = END.exec(text);
+  const library = start && end && end.index > start.index;
+  if (text.includes("\f") && !library) {
+    const pages = text.split("\f");
+    if (pages.length > 1 && !/\S/u.test(pages.at(-1)))
+      pages.pop();
+    return {
+      paged: true,
+      coverage: "all",
+      page_count: pages.length,
+      identity: {},
+      method: "born_text",
+      tools: [converterTool],
+      notes: ["Pages are divided at the form feeds in the text."],
+      parts: pages.map((page, index) => {
+        const trimmed = page.replace(/^\n+|\n+$/g, "");
+        return {
+          index,
+          label: { status: "undetermined" },
+          columns: "undetermined",
+          undetermined: ["paragraphs", "headings", "footnotes", "block-quotes", "tables", "captions", "figures", "running-heads", "folio"],
+          blocks: trimmed.trim() ? [textBlock("undetermined", trimmed)] : []
+        };
+      })
+    };
+  }
+  const header = library ? text.slice(0, start.index + start[0].length) : "";
+  const footer = library ? text.slice(end.index) : "";
+  const body = library ? text.slice(start.index + start[0].length, end.index) : text;
+  const builder = new PartBuilder(false);
+  const blank = { basis: "blank-line" };
+  if (header)
+    builder.add(textBlock("boilerplate", header.trim(), { basis: "boundary-mark" }));
+  const all = paragraphs(body);
+  const noteLabels = new Set(all.flatMap((p) => /^\s*\[Footnote ([0-9]{1,4}|[A-Z]):/.exec(p)?.[1] ?? []));
+  const used = new Set;
+  for (const paragraph of all) {
+    const single = !paragraph.includes(`
+`);
+    const note = /^\s*\[Footnote ([0-9]{1,4}|[A-Z]):[\s\S]*\]\s*$/.exec(paragraph);
+    if (note)
+      builder.add(textBlock("footnote", paragraph, { label: note[1], basis: "boundary-mark" }));
+    else if (single && chapterOf(paragraph))
+      builder.heading(textBlock("heading", paragraph.trim(), { level: "2", basis: "chapter-line" }), paragraph.trim());
+    else if (/^\s*\[Illustration[^\]]*\]\s*$/.test(paragraph))
+      builder.add(textBlock("figure", paragraph.trim(), { by: "software:stemma-convert", basis: "boundary-mark" }));
+    else {
+      const content = encodeText(paragraph).replace(/\[([0-9]{1,4}|[A-Z])\]/g, (whole, label) => {
+        if (!noteLabels.has(label))
+          return whole;
+        used.add(label);
+        return inline("fnref", { label }, whole);
+      });
+      builder.add(block("paragraph", content, blank));
+    }
+  }
+  if (footer)
+    builder.add(textBlock("boilerplate", footer.trim(), { basis: "boundary-mark" }));
+  const built = builder.build(["headings", "block-quotes", "tables", "captions"]);
+  const found = library ? gutenbergHeader(header) : { identity: {}, notes: [] };
+  return {
+    ...built,
+    coverage: "all",
+    identity: found.identity,
+    method: "born_text",
+    tools: [converterTool],
+    ..."version" in found && found.version ? { version: found.version } : {},
+    notes: [
+      "A plain text has no pages here and is given none. Paragraphs are divided at blank lines; headings are recognized only as chapter lines.",
+      ...library ? ["The library's text before and after the work is kept and marked as boilerplate."] : [],
+      ...found.notes
+    ]
+  };
+}
+var plainInline = (line) => line.replace(/!\[[^\]]*\]\([^)]*\)/g, "").replace(/\[([^\]]+)\]\([^)]*\)/g, "$1").replace(/(\*\*|__)(?=\S)(.+?)(?<=\S)\1/g, "$2").replace(/(?<![\w*])\*(?=\S)(.+?)(?<=\S)\*(?![\w*])/g, "$1").replace(/(?<![\w_])_(?=\S)(.+?)(?<=\S)_(?![\w_])/g, "$1").replace(/`([^`]*)`/g, "$1");
+function convertMarkdown(input) {
+  let text = cleanText(input);
+  if (!/\S/u.test(text))
+    throw new Unconvertible("There is no machine-readable text: it is empty or only white space.");
+  const identity = {};
+  const front = /^---\n([\s\S]*?)\n---\n/.exec(text);
+  if (front) {
+    text = text.slice(front[0].length);
+    for (const line of front[1].split(`
+`)) {
+      const [, key, raw] = /^([A-Za-z_]+)\s*:\s*(.*)$/.exec(line) ?? [];
+      const value = raw?.trim().replace(/^(["'])(.*)\1$/, "$2");
+      if (!key || !value)
+        continue;
+      if (key === "title")
+        identity.title = value;
+      if (key === "author")
+        identity.contributors = [value];
+      if (key === "date")
+        identity.issued = value;
+      if (key === "publisher")
+        identity.publisher = value;
+      if (key === "doi" || key === "isbn")
+        identity.identifiers = [...identity.identifiers ?? [], { scheme: key, value }];
+    }
+    if (Object.keys(identity).length > 0)
+      identity.basis = "the file's front matter";
+  }
+  text = text.replace(/<!--[\s\S]*?-->/g, "");
+  const defined = new Set([...text.matchAll(/^\[\^([^\]\s]+)\]:/gm)].map((m) => m[1]));
+  const phrase = (value) => {
+    const figures = [...value.matchAll(/!\[([^\]]*)\]\([^)]*\)/g)].map((m) => m[1]);
+    for (const alt of figures)
+      pendingFigures.push(textBlock("figure", alt ? `Image with the alternative text: ${alt}` : "Image with no alternative text.", { by: "software:stemma-convert", basis: "markup" }));
+    return encodeText(plainInline(value)).replace(/\[\^([^\]\s]+)\]/g, (whole, label) => defined.has(label) ? inline("fnref", { label }, encodeText(label)) : whole);
+  };
+  const pendingFigures = [];
+  const builder = new PartBuilder(false);
+  const lines = text.split(`
+`);
+  const emit = (b) => {
+    builder.add(b);
+    for (const figure of pendingFigures.splice(0))
+      builder.add(figure);
+  };
+  for (let i = 0;i < lines.length; ) {
+    const line = lines[i];
+    const markup = { basis: "markup" };
+    const take = (test) => {
+      const taken = [lines[i++]];
+      while (i < lines.length && test(lines[i]))
+        taken.push(lines[i++]);
+      return taken;
+    };
+    const heading = /^(#{1,6})\s+(.*?)\s*#*\s*$/.exec(line);
+    const note = /^\[\^([^\]\s]+)\]:\s*(.*)$/.exec(line);
+    const starts = (l) => /^(#{1,6}\s|>|\||\[\^[^\]]+\]:|\s*(?:[-*+]|\d+[.)])\s|```)/.test(l);
+    if (line.trim() === "")
+      i++;
+    else if (heading) {
+      i++;
+      builder.heading(block("heading", phrase(heading[2]), { level: String(heading[1].length), ...markup }), plainInline(heading[2]));
+      for (const figure of pendingFigures.splice(0))
+        builder.add(figure);
+    } else if (note) {
+      const rest = take((l) => /^\s{2,}\S/.test(l)).slice(1);
+      emit(block("footnote", phrase([note[2], ...rest.map((l) => l.trim())].join(`
+`)), { label: note[1], ...markup }));
+    } else if (line.startsWith("```")) {
+      i++;
+      const code = [];
+      while (i < lines.length && !lines[i].startsWith("```"))
+        code.push(lines[i++]);
+      i++;
+      emit(block("paragraph", encodeText(code.join(`
+`)), markup));
+    } else if (line.startsWith(">")) {
+      emit(block("blockquote", phrase(take((l) => l.startsWith(">")).map((l) => l.replace(/^>\s?/, "")).join(`
+`)), markup));
+    } else if (line.startsWith("|")) {
+      emit(block("table", take((l) => l.startsWith("|")).map(phrase).join(`
+`), markup));
+    } else if (/^\s*(?:[-*+]|\d+[.)])\s/.test(line)) {
+      const item = take((l) => /^\s{2,}\S/.test(l) && !/^\s*(?:[-*+]|\d+[.)])\s/.test(l));
+      emit(block("list-item", phrase(item.map((l, n) => n === 0 ? l.replace(/^\s*(?:[-*+]|\d+[.)])\s+/, "") : l.trim()).join(`
+`)), markup));
+    } else {
+      const content = phrase(take((l) => l.trim() !== "" && !starts(l)).join(`
+`)).trim();
+      emit(block("paragraph", content, markup));
+    }
+  }
+  return {
+    ...builder.build(),
+    coverage: "all",
+    identity,
+    method: "markup",
+    tools: [converterTool],
+    notes: ["Markdown syntax gives the structure; emphasis, link, and code marks are removed from the text, and images are described by their alternative text."]
+  };
+}
+
+// packages/extract/src/pdf-structure.ts
+var PDF_RULES = {
+  edge_lines: 2,
+  recurring_pages: 3,
+  head_letters: 4,
+  column_lines: 5,
+  heading_ratio: 1.2,
+  heading_characters: 120,
+  note_ratio: 0.92,
+  marker_ratio: 0.8
+};
+var lettersOf = (text) => text.normalize("NFKD").replace(/[^\p{L}]/gu, "").toLowerCase();
+var bare2 = (text) => text.trim().replace(/^[[(\u2014\u2013\s.-]+|[\])\u2014\u2013\s.-]+$/g, "");
+var edgesOf = (lines) => {
+  const n = PDF_RULES.edge_lines;
+  return lines.map((_, i) => i).filter((i) => i < n || i >= lines.length - n);
+};
+function recurringHeads(pages) {
+  const seen = new Map;
+  for (const lines of pages) {
+    for (const key of new Set(edgesOf(lines).map((i) => lettersOf(lines[i].text)))) {
+      if (key.length >= PDF_RULES.head_letters)
+        seen.set(key, (seen.get(key) ?? 0) + 1);
+    }
+  }
+  return new Set([...seen].filter(([, n]) => n >= PDF_RULES.recurring_pages).map(([key]) => key));
+}
+function bodySize(pages) {
+  const weight = new Map;
+  for (const lines of pages) {
+    for (const item of lines.flatMap((l) => l.items)) {
+      const size = Math.round(item.size * 10) / 10;
+      weight.set(size, (weight.get(size) ?? 0) + item.text.length);
+    }
+  }
+  return [...weight].sort((a, b) => b[1] - a[1] || a[0] - b[0])[0]?.[0] ?? 0;
+}
+var lineSize = (line) => {
+  const longest = [...line.items].sort((a, b) => b.text.length - a.text.length)[0];
+  return longest?.size ?? 0;
+};
+var MARKER = /^(\d{1,3}|[*\u2020\u2021\u00A7])$/;
+function raisedMarkers(line) {
+  const size = lineSize(line);
+  const main = line.items.find((i) => i.size === size);
+  if (!main)
+    return [];
+  return line.items.flatMap((item, at) => item.size <= size * PDF_RULES.marker_ratio && item.y > main.y + size * 0.15 && MARKER.test(item.text.trim()) && at > 0 ? [{ at, label: item.text.trim() }] : []);
+}
+function pairNotes(body, size) {
+  const raised = body.flatMap((t) => raisedMarkers(t.line).map((m) => ({ ...m, tagged: t })));
+  const candidates = raised.filter((c) => raised.filter((o) => o.label === c.label).length === 1);
+  if (candidates.length === 0)
+    return;
+  let first = body.length;
+  while (first > 0 && lineSize(body[first - 1].line) <= size * PDF_RULES.note_ratio)
+    first--;
+  const foot = body.slice(first);
+  const paired = new Set;
+  let current;
+  for (const tagged of foot) {
+    const text = tagged.line.text.trimStart();
+    const found = candidates.find((c) => !paired.has(c.label) && !foot.includes(c.tagged) && text.startsWith(c.label));
+    if (found) {
+      current = found.label;
+      paired.add(current);
+    }
+    if (current)
+      Object.assign(tagged, { role: "footnote", basis: "font-size", label: current });
+  }
+  for (const c of candidates) {
+    if (paired.has(c.label) && c.tagged.role !== "footnote")
+      (c.tagged.markers ??= []).push({ at: c.at, label: c.label });
+  }
+}
+var inked = (line) => line.items.filter((i) => i.text.trim() !== "");
+function columnsOf(body, width) {
+  const span = (line) => ({
+    left: Math.min(...inked(line).map((i) => i.x)),
+    right: Math.max(...inked(line).map((i) => i.x + i.width))
+  });
+  let left = 0;
+  let right = 0;
+  let crossing = 0;
+  for (const { line } of body) {
+    const { left: from, right: to } = span(line);
+    if (to <= width * 0.52)
+      left++;
+    else if (from >= width * 0.48)
+      right++;
+    else
+      crossing++;
+  }
+  if (crossing === 0 && left >= PDF_RULES.column_lines && right >= PDF_RULES.column_lines)
+    return "2";
+  const gapped = body.filter(({ line }) => line.items.filter((i) => i.text.trim() !== "").sort((a, b) => a.x - b.x).some((item, i, all) => {
+    const next = all[i + 1];
+    return next !== undefined && next.x - (item.x + item.width) > width * 0.04 && item.x + item.width < width * 0.52 && next.x > width * 0.48;
+  })).length;
+  if (gapped >= PDF_RULES.column_lines)
+    return "undetermined";
+  return body.length >= PDF_RULES.column_lines && crossing >= body.length * 0.8 ? "1" : "undetermined";
+}
+var lineText = (tagged) => {
+  if (!tagged.markers)
+    return encodeText(cleanText(tagged.line.text).replace(/\n/g, " "));
+  let out = "";
+  let at = 0;
+  const text = tagged.line.text;
+  tagged.line.items.forEach((item, i) => {
+    const found = text.indexOf(item.text, at);
+    if (found < 0)
+      return;
+    out += encodeText(cleanText(text.slice(at, found)));
+    const marker = tagged.markers.find((m) => m.at === i);
+    out += marker ? inline("fnref", { label: marker.label }, encodeText(item.text)) : encodeText(cleanText(item.text));
+    at = found + item.text.length;
+  });
+  return out + encodeText(cleanText(text.slice(at)));
+};
+function blocksOf(lines) {
+  const blocks = [];
+  for (const tagged of lines) {
+    const key = [tagged.role, tagged.label, tagged.column, tagged.basis].join("|");
+    const last = blocks.at(-1);
+    if (last?.key === key && tagged.role !== "heading" && tagged.role !== "running-head")
+      last.content += `
+${lineText(tagged)}`;
+    else {
+      blocks.push({
+        key,
+        role: tagged.role,
+        content: lineText(tagged),
+        ...tagged.label ? { label: tagged.label } : {},
+        ...tagged.column ? { column: tagged.column } : {},
+        ...tagged.basis ? { basis: tagged.basis } : {}
+      });
+    }
+  }
+  return blocks.map(({ key: _, ...b }) => b);
+}
+function structurePdf(read, options) {
+  const heads = recurringHeads(read.lines);
+  const size = bodySize(read.lines);
+  return read.lines.map((lines, index) => {
+    const label = options.labels.get(index) ?? { status: "undetermined" };
+    const edges = new Set(edgesOf(lines));
+    const tagged = lines.map((line, i) => {
+      if (edges.has(i)) {
+        if (label.label !== undefined && bare2(line.text) === label.label)
+          return { line, role: "folio", basis: "printed-label" };
+        if (heads.has(lettersOf(line.text)))
+          return { line, role: "running-head", basis: "repeated-line" };
+      }
+      return { line, role: "undetermined" };
+    });
+    const body = tagged.filter((t) => t.role === "undetermined");
+    const columns = columnsOf(body, read.widths[index]);
+    if (!options.recognized && size > 0) {
+      pairNotes(body, size);
+      for (const t of body) {
+        if (t.role === "undetermined" && lineSize(t.line) >= size * PDF_RULES.heading_ratio && t.line.text.trim().length <= PDF_RULES.heading_characters) {
+          Object.assign(t, { role: "heading", basis: "font-size" });
+        }
+      }
+    }
+    let ordered = tagged;
+    if (columns === "2") {
+      const side = (t) => Math.min(...t.line.items.map((i) => i.x)) < read.widths[index] * 0.48 ? "1" : "2";
+      for (const t of body)
+        if (t.role !== "footnote")
+          t.column = side(t);
+      const before = tagged.filter((t, i) => !body.includes(t) && i < lines.length / 2);
+      const after = tagged.filter((t) => !body.includes(t) && !before.includes(t));
+      ordered = [...before, ...body.filter((t) => t.column === "1"), ...body.filter((t) => t.column === "2"), ...body.filter((t) => !t.column), ...after];
+    }
+    const blocks = blocksOf(ordered);
+    const undetermined = [
+      "paragraphs",
+      "block-quotes",
+      "tables",
+      "captions",
+      "figures",
+      ...blocks.some((b) => b.role === "heading") ? [] : ["headings"],
+      ...blocks.some((b) => b.role === "footnote") ? [] : ["footnotes"],
+      ...lines.length > 0 && label.label === undefined ? ["folio"] : [],
+      ...lines.length > 0 && columns === "undetermined" ? ["reading-order"] : []
+    ];
+    const removed = read.removed[index] ?? [];
+    return { index, label, columns, undetermined: lines.length > 0 ? undetermined : [], blocks, ...removed.length > 0 ? { removed } : {}, ...lines.length === 0 ? { note: "The file's text layer holds no text on this page." } : {} };
+  });
+}
+function convertPdf(read, options) {
+  if (!read.pages.some((p) => /\S/u.test(p))) {
+    throw new Unconvertible("There is no machine-readable text: no page of this PDF has a text layer, as with a scan that was never put through character recognition. Its text has to come from a recognition tool you run, or be typed, as a transcription.");
+  }
+  const empty = read.lines.filter((l) => l.length === 0).length;
+  const produced = [read.info.producer && `producer ${read.info.producer}`, read.info.creator && `creator ${read.info.creator}`].filter(Boolean).join("; ");
+  return {
+    paged: true,
+    coverage: "all",
+    page_count: read.pages.length,
+    parts: structurePdf(read, options),
+    identity: {
+      ...read.info.title ? { title: read.info.title } : {},
+      ...read.info.author ? { contributors: [read.info.author] } : {},
+      ...read.info.title || read.info.author ? { basis: "the PDF's document information" } : {}
+    },
+    method: options.recognized ? "ocr" : "text_layer",
+    tools: [read.tool, converterTool],
+    ...options.recognized ? { recognition: `Character recognition that made the PDF's text layer; engine not stated by the file${produced ? ` (${produced})` : ""}` } : {},
+    notes: [
+      "Text is read from the PDF's text layer and was not compared with the page images by this conversion.",
+      ...empty > 0 ? [`${empty} of ${read.pages.length} pages have no text in the text layer.`] : [],
+      ...produced && !options.recognized ? [`The PDF names its ${produced}.`] : []
+    ]
+  };
+}
+// packages/extract/src/convert.ts
+var decode = (bytes) => {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    throw new Unconvertible("The file is not valid UTF-8 text.");
+  }
+};
+function withoutStamps(converted) {
+  const parts = converted.parts.map((part) => {
+    const rules = [];
+    const blocks = part.blocks.flatMap((b) => {
+      const cleaned = removeStamps(b.content);
+      if (cleaned.rules.length === 0)
+        return [b];
+      rules.push(...cleaned.rules);
+      const content = cleaned.text.replace(/^\s*\n|\n\s*$/g, "");
+      return content.trim() === "" ? [] : [{ ...b, content }];
+    });
+    return rules.length === 0 ? part : { ...part, blocks, removed: removals(rules) };
+  });
+  return { ...converted, parts };
+}
+function convertMarkupOrText(bytes, mediaType) {
+  return withoutStamps(converted(bytes, mediaType));
+}
+function converted(bytes, mediaType) {
+  switch (mediaType) {
+    case "text/plain":
+      return convertText(decode(bytes));
+    case "text/markdown":
+      return convertMarkdown(decode(bytes));
+    case "text/html":
+    case "application/xhtml+xml":
+      return convertHtml(decode(bytes));
+    case "application/epub+zip":
+      return convertEpub(bytes);
+    case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+      return convertDocx(bytes);
+    default:
+      throw new Unconvertible(`No converter reads ${mediaType}. A page image's text must come as a transcription.`);
+  }
+}
+// packages/extract/src/transcription.ts
+var PAGE = /^<!-- stemma:page((?: [a-z_]+="[^"<>\n]*")+) -->$/;
+function parseTranscription(input, method) {
+  const lines = cleanText(input).split(`
+`);
+  const starts = lines.flatMap((line, i) => PAGE.test(line) ? [i] : []);
+  if (starts.length === 0 || lines.slice(0, starts[0]).some((l) => l.trim() !== "")) {
+    throw new Unconvertible('A transcription with blocks must begin each page with a line such as <!-- stemma:page index="0" -->.');
+  }
+  let previous = -1;
+  const parts = starts.map((at, n) => {
+    const values = parseAttributes(PAGE.exec(lines[at])[1]);
+    const index = Number(values.index);
+    if (!Number.isSafeInteger(index) || index <= previous)
+      throw new Unconvertible("Page indexes must be whole numbers that increase.");
+    previous = index;
+    const { blocks, problems } = parseBlocks(lines.slice(at + 1, starts[n + 1] ?? lines.length).join(`
+`), at + 2);
+    if (problems.length > 0)
+      throw new Unconvertible(`The transcription cannot be used: ${problems.map((p) => `${p.code} at line ${p.line}`).join(", ")}.`);
+    const status = values.label !== undefined ? "labelled" : values.label_status;
+    if (status !== undefined && !values.basis)
+      throw new Unconvertible("A page label, or a statement that there is none, needs its basis.");
+    const label = status === undefined ? { status: "undetermined" } : { status, basis: values.basis, ...values.label !== undefined ? { label: values.label } : {} };
+    return { index, label, columns: "undetermined", undetermined: [], blocks };
+  });
+  return {
+    paged: true,
+    coverage: "partial",
+    parts,
+    identity: {},
+    method,
+    tools: [converterTool],
+    notes: ["The text was supplied as a transcription."]
+  };
+}
+
+// packages/extract/src/index.ts
 class PdfUnreadable extends Error {
   problem;
   constructor(problem, detail = "") {
@@ -108939,6 +112079,7 @@ function assetDirectory() {
     return shipped;
   return dirname(Bun.resolveSync("pdfjs-dist/package.json", import.meta.dir));
 }
+var PDFJS_VERSION = "6.5.438";
 async function readPdf(bytes, limits, assets = assetDirectory()) {
   for (const name of ["cmaps", "standard_fonts"]) {
     if (!existsSync(join(assets, name)))
@@ -108963,23 +112104,50 @@ async function readPdf(bytes, limits, assets = assetDirectory()) {
     if (document2.numPages > limits.pages)
       throw new PdfUnreadable("too_many_pages");
     const pages = [];
+    const lines = [];
+    const widths = [];
+    const removed = [];
     let size = 0;
     for (let number = 1;number <= document2.numPages; number++) {
       if (Date.now() - started > limits.milliseconds)
         throw new PdfUnreadable("too_slow");
       const page = await document2.getPage(number);
       const content = await page.getTextContent({ disableNormalization: true });
-      const text = content.items.map((item) => ("str" in item) ? item.str + (item.hasEOL ? `
-` : "") : "").join("").replace(/\f/g, " ").replace(/\0/g, "\uFFFD");
+      const items = content.items.flatMap((item) => ("str" in item) ? [item] : []);
+      const cleaned = removeFromPieces(items.map((item) => ({ text: item.str, after: item.hasEOL ? `
+` : "" })));
+      removed.push(removals(cleaned.rules));
+      const text = items.map((item, i) => cleaned.texts[i] + (item.hasEOL ? `
+` : "")).join("").replace(/\f/g, " ").replace(/\0/g, "\uFFFD");
       size += Buffer.byteLength(text) + 1;
       if (size > limits.text_bytes)
         throw new PdfUnreadable("too_much_text");
       pages.push(text);
+      const pageLines = [{ items: [], text: "" }];
+      for (const [i, item] of items.entries()) {
+        const line = pageLines.at(-1);
+        const piece = cleaned.texts[i].replace(/[\f\0]/g, " ");
+        line.text += piece;
+        if (piece !== "") {
+          const [a, b, , d, x, y] = item.transform;
+          line.items.push({ text: piece, x, y, width: item.width, size: Math.hypot(a, b) || Math.abs(d) });
+        }
+        if (item.hasEOL)
+          pageLines.push({ items: [], text: "" });
+      }
+      lines.push(pageLines.filter((l) => l.text.trim() !== ""));
+      widths.push(page.view[2] - page.view[0]);
       page.cleanup();
     }
     const labels = await document2.getPageLabels();
+    const stated = (await document2.getMetadata()).info ?? {};
+    const info = Object.fromEntries(["Title", "Author", "Producer", "Creator"].flatMap((k) => typeof stated[k] === "string" && stated[k].trim() ? [[k.toLowerCase(), stated[k].trim()]] : []));
     return {
       pages,
+      lines,
+      widths,
+      removed,
+      info,
       ...labels ? { embeddedLabels: labels } : {},
       tool: { name: "pdfjs-dist", version: api_version }
     };
@@ -108996,17 +112164,82 @@ async function readPdf(bytes, limits, assets = assetDirectory()) {
 }
 
 // packages/workspace/src/index.ts
-import { randomBytes as randomBytes2 } from "crypto";
-import { appendFileSync, existsSync as existsSync3, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, realpathSync as realpathSync2, renameSync as renameSync2, rmSync as rmSync2, writeFileSync } from "fs";
-import { dirname as dirname3, isAbsolute as isAbsolute2, join as join3, relative as relative2, resolve as resolve2, sep as sep2 } from "path";
+import { randomBytes } from "crypto";
+import { appendFileSync, existsSync as existsSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, realpathSync, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { dirname as dirname2, isAbsolute, join as join3, relative, resolve, sep } from "path";
 
-// packages/workspace/src/store.ts
-import { createHash as createHash2, randomBytes } from "crypto";
+// packages/workspace/src/fetch.ts
+import { lookup } from "dns/promises";
+import { isIP } from "net";
+var FETCH_LIMITS = { bytes: 200 * 1024 * 1024, milliseconds: 300000, redirects: 5 };
+
+class FetchRefused extends Error {
+}
+var privateAddress = (address) => {
+  const v4 = /^(?:::ffff:)?(\d+)\.(\d+)\.\d+\.\d+$/i.exec(address);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 0 || a === 10 || a === 127 || a === 100 && b >= 64 && b < 128 || a === 169 && b === 254 || a === 172 && b >= 16 && b < 32 || a === 192 && b === 168 || a >= 224;
+  }
+  return /^(::1?$|f[cd]|fe[89ab]|ff)/i.test(address);
+};
+async function checkAddress(url) {
+  if (url.protocol !== "https:")
+    throw new FetchRefused(`Only https addresses are fetched, not ${url.protocol}//.`);
+  if (url.username || url.password)
+    throw new FetchRefused("An address with a user name or password is not fetched.");
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  let addresses;
+  try {
+    addresses = isIP(host) ? [host] : (await lookup(host, { all: true })).map((a) => a.address);
+  } catch {
+    throw new FetchRefused(`The host ${host} could not be found.`);
+  }
+  if (addresses.some(privateAddress))
+    throw new FetchRefused(`${host} is a local or private address, which is not fetched.`);
+}
+async function fetchBytes(address, userAgent, limit = FETCH_LIMITS.bytes) {
+  let url;
+  try {
+    url = new URL(address);
+  } catch {
+    throw new FetchRefused("That is not a web address.");
+  }
+  const signal = AbortSignal.timeout(FETCH_LIMITS.milliseconds);
+  for (let hop = 0;hop <= FETCH_LIMITS.redirects; hop++) {
+    await checkAddress(url);
+    let response;
+    try {
+      response = await fetch(url, { redirect: "manual", signal, headers: { "user-agent": userAgent } });
+    } catch (error) {
+      throw new FetchRefused(`The request to ${url.host} failed: ${error instanceof Error ? error.message : "no response"}.`);
+    }
+    const next = response.headers.get("location");
+    if (response.status >= 300 && response.status < 400 && next) {
+      url = new URL(next, url);
+      continue;
+    }
+    if (response.status === 404)
+      return { bytes: new Uint8Array(await response.arrayBuffer()).slice(0, 4096), status: 404 };
+    if (!response.ok)
+      throw new FetchRefused(`${url.host} answered ${response.status}, so nothing was fetched.`);
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of response.body) {
+      size += chunk.length;
+      if (size > limit)
+        throw new FetchRefused(`The response passed the limit of ${Math.round(limit / 1048576)} MiB.`);
+      chunks.push(chunk);
+    }
+    return { bytes: new Uint8Array(Buffer.concat(chunks)), status: response.status };
+  }
+  throw new FetchRefused("Too many redirects.");
+}
+// packages/workspace/src/originals.ts
+import { createHash as createHash2 } from "crypto";
 import {
-  chmodSync,
   closeSync,
   constants,
-  existsSync as existsSync2,
   fstatSync,
   lstatSync,
   mkdirSync,
@@ -109014,74 +112247,12 @@ import {
   readdirSync,
   readFileSync,
   readSync,
-  realpathSync,
   renameSync,
   rmSync,
   statSync,
-  writeSync
+  writeFileSync
 } from "fs";
-import { homedir } from "os";
-import { basename, dirname as dirname2, isAbsolute, join as join2, relative, resolve, sep } from "path";
-
-class UnsafeStore extends Error {
-}
-function storeLocation(root, projectId, option, env = process.env) {
-  if (option)
-    return { path: resolve(root, option), chosen_by: "--store-dir" };
-  if (env.STEMMA_STORE_DIR)
-    return { path: resolve(root, env.STEMMA_STORE_DIR), chosen_by: "STEMMA_STORE_DIR" };
-  if (typeof projectId !== "string" || !/^[0-9a-z]{8,40}$/.test(projectId)) {
-    throw new UnsafeStore("project_id in stemma.json cannot form a directory name; name the store with --store-dir.");
-  }
-  const home = env.HOME || homedir();
-  const base = process.platform === "darwin" ? join2(home, "Library/Application Support") : process.platform === "win32" ? env.LOCALAPPDATA || join2(home, "AppData/Local") : env.XDG_DATA_HOME || join2(home, ".local/share");
-  return { path: join2(base, "stemma", "stores", projectId), chosen_by: "default" };
-}
-function realTarget(path) {
-  const missing = [];
-  let at = resolve(path);
-  while (!existsSync2(at) && dirname2(at) !== at) {
-    missing.unshift(basename(at));
-    at = dirname2(at);
-  }
-  return join2(realpathSync(at), ...missing);
-}
-var within = (outer, path) => {
-  const rel = relative(outer, path);
-  return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
-};
-function gitIgnores(tree, path) {
-  const git = (...args) => {
-    try {
-      return Bun.spawnSync(["git", "-c", "core.fsmonitor=false", "-C", tree, ...args], { stdout: "pipe", stderr: "pipe" });
-    } catch {
-      return;
-    }
-  };
-  const rel = relative(tree, path);
-  if (rel === "")
-    return false;
-  const ignored = git("check-ignore", "--quiet", "--", join2(rel, "sha256", "probe"));
-  const tracked = git("ls-files", "-z", "--", rel);
-  return ignored?.exitCode === 0 && tracked?.exitCode === 0 && tracked.stdout.length === 0;
-}
-function storeProblem(root, path) {
-  const target = realTarget(path);
-  const project = realpathSync(root);
-  if (within(project, target))
-    return "it is inside the project directory. The store is private and kept apart from the project";
-  if (within(target, project))
-    return "the project is inside it";
-  if (existsSync2(target) && !statSync(target).isDirectory())
-    return "it is not a directory";
-  for (let at = target;; at = dirname2(at)) {
-    if (existsSync2(join2(at, ".git")) && !gitIgnores(at, target)) {
-      return "it is inside a git working tree that does not ignore it (or git could not be asked), so copies of sources could be committed";
-    }
-    if (dirname2(at) === at)
-      return;
-  }
-}
+import { extname, join as join2 } from "path";
 var CHUNK = 1 << 20;
 function hashFile(path, sink) {
   const handle = openSync(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -109105,12 +112276,44 @@ function hashFile(path, sink) {
 
 class UnsupportedFile extends Error {
 }
-function inspectSourceFile(path, limit) {
+var IMAGE_TYPES = ["image/png", "image/jpeg", "image/tiff"];
+var starts = (bytes, ...values) => values.every((v, i) => bytes[i] === v);
+function mediaType(bytes, name) {
+  const head = new TextDecoder("latin1").decode(bytes.subarray(0, 4096));
+  if (head.startsWith("%PDF-"))
+    return "application/pdf";
+  if (starts(bytes, 137, 80, 78, 71))
+    return "image/png";
+  if (starts(bytes, 255, 216, 255))
+    return "image/jpeg";
+  if (starts(bytes, 73, 73, 42, 0) || starts(bytes, 77, 77, 0, 42))
+    return "image/tiff";
+  if (starts(bytes, 80, 75, 3, 4)) {
+    if (head.includes("mimetypeapplication/epub+zip"))
+      return "application/epub+zip";
+    return Buffer.from(bytes).includes("word/document.xml") ? "application/vnd.openxmlformats-officedocument.wordprocessingml.document" : undefined;
+  }
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+  } catch {
+    return;
+  }
+  if (/[\u0000-\u0008\u000b\u000e-\u001f]/.test(text) || text.startsWith("{\\rtf"))
+    return;
+  const opening = text.slice(0, 1000).trimStart().toLowerCase();
+  if (opening.startsWith("<!doctype html") || opening.startsWith("<html"))
+    return "text/html";
+  if (opening.startsWith("<?xml") && /<html[\s>]/.test(opening))
+    return "application/xhtml+xml";
+  return /^\.(md|markdown)$/i.test(extname(name)) ? "text/markdown" : "text/plain";
+}
+function readOriginal(path, limit) {
   let stat;
   try {
     stat = statSync(path);
   } catch {
-    throw new UnsupportedFile("The file cannot be read.");
+    throw new UnsupportedFile(`The file cannot be read: ${path}`);
   }
   if (!stat.isFile())
     throw new UnsupportedFile("That is not a regular file.");
@@ -109118,140 +112321,51 @@ function inspectSourceFile(path, limit) {
     throw new UnsupportedFile(`The file is larger than the limit of ${limit / 1024 / 1024} MiB.`);
   if (stat.size === 0)
     throw new UnsupportedFile("The file is empty.");
-  const decoder = new TextDecoder("utf-8", { fatal: true });
-  let head = "";
-  let pdf;
-  let text = true;
-  const found = hashFile(path, (chunk) => {
-    pdf ??= new TextDecoder("latin1").decode(chunk.subarray(0, 5)) === "%PDF-";
-    if (pdf || !text)
-      return;
-    try {
-      const piece = decoder.decode(chunk, { stream: true });
-      if (head.length < 200)
-        head += piece.slice(0, 200);
-      if (/[\u0000-\u0008\u000b\u000e-\u001f]/.test(piece))
-        text = false;
-    } catch {
-      text = false;
-    }
-  });
-  if (found.size > limit)
-    throw new UnsupportedFile("The file grew past the limit while it was read.");
-  if (pdf)
-    return { media_type: "application/pdf", ...found };
-  if (text) {
-    try {
-      decoder.decode();
-    } catch {
-      text = false;
-    }
+  const bytes = new Uint8Array(readFileSync(path));
+  const type = mediaType(bytes, path);
+  if (!type) {
+    throw new UnsupportedFile("This version reads PDF, EPUB, DOCX, HTML, Markdown, plain UTF-8 text, and PNG, JPEG or TIFF page images; this file is none of them. Nothing was written.");
   }
-  const markup = /^\uFEFF?\s*(<!doctype html|<html|\{\\rtf)/i.test(head);
-  if (!text || markup) {
-    throw new UnsupportedFile("This version takes PDF files and plain UTF-8 text only; this file is neither. Nothing was stored, and no source is marked as checked.");
-  }
-  return { media_type: "text/plain", ...found };
+  return { bytes, sha256: createHash2("sha256").update(bytes).digest("hex"), size: bytes.length, media_type: type };
 }
-
-class BlobStore {
-  root;
-  constructor(root) {
-    this.root = root;
+var cacheDirectory = (root) => join2(root, ".stemma/originals");
+function cacheOriginal(root, bytes, sha256) {
+  const directory = cacheDirectory(root);
+  mkdirSync(directory, { recursive: true });
+  const target = join2(directory, sha256);
+  const temporary = `${target}.tmp`;
+  try {
+    writeFileSync(temporary, bytes);
+    renameSync(temporary, target);
+  } finally {
+    rmSync(temporary, { force: true });
   }
-  address(digest) {
-    if (!/^[0-9a-f]{64}$/.test(digest))
-      throw new Error("not a digest");
-    return join2(this.root, "sha256", digest.slice(0, 2), digest);
-  }
-  plain(digest) {
-    const path = this.address(digest);
+  return target;
+}
+function findOriginal(root, wanted, places = []) {
+  const queue = [join2(cacheDirectory(root), wanted.sha256), ...places];
+  for (let i = 0;i < queue.length && i < 1e5; i++) {
+    const path = queue[i];
+    let stat;
     try {
-      for (const directory of [dirname2(dirname2(path)), dirname2(path)]) {
-        if (!lstatSync(directory).isDirectory())
-          return "unreadable";
-      }
-      return lstatSync(path).isFile() ? "present" : "unreadable";
-    } catch (error) {
-      return error.code === "ENOENT" ? "missing" : "unreadable";
-    }
-  }
-  has(digest) {
-    return this.plain(digest) === "present";
-  }
-  verify(digest) {
-    const state = this.plain(digest);
-    if (state !== "present")
-      return state;
-    try {
-      return hashFile(this.address(digest)).sha256 === digest ? "ok" : "altered";
+      stat = i === 0 || places.includes(path) ? statSync(path) : lstatSync(path);
     } catch {
-      return "unreadable";
+      continue;
     }
+    if (stat.isDirectory()) {
+      queue.push(...readdirSync(path).filter((n) => !n.startsWith(".")).sort().map((n) => join2(path, n)));
+    } else if (stat.isFile() && stat.size === wanted.size && hashFile(path).sha256 === wanted.sha256)
+      return path;
   }
-  get(digest) {
-    if (this.plain(digest) !== "present")
-      return;
-    try {
-      const bytes = new Uint8Array(readFileSync(this.address(digest)));
-      return createHash2("sha256").update(bytes).digest("hex") === digest ? bytes : undefined;
-    } catch {
-      return;
-    }
-  }
-  put(from, digest) {
-    const target = this.address(digest);
-    const before = this.verify(digest);
-    if (before === "ok")
-      return "present";
-    const temporary = join2(this.root, "tmp", randomBytes(12).toString("hex"));
-    for (const directory of [this.root, join2(this.root, "tmp"), join2(this.root, "sha256"), dirname2(target)]) {
-      mkdirSync(directory, { recursive: true, mode: 448 });
-      if (directory !== this.root && !lstatSync(directory).isDirectory())
-        throw new UnsafeStore(`${directory} is not a plain directory.`);
-    }
-    try {
-      const handle = openSync(temporary, "wx", 384);
-      try {
-        const out = (chunk) => {
-          for (let done = 0;done < chunk.length; )
-            done += writeSync(handle, chunk, done);
-        };
-        if ("file" in from)
-          hashFile(from.file, out);
-        else
-          out(from.bytes);
-      } finally {
-        closeSync(handle);
-      }
-      if (hashFile(temporary).sha256 !== digest)
-        throw new Error("the bytes changed while they were being stored");
-      chmodSync(temporary, 384);
-      renameSync(temporary, target);
-    } finally {
-      rmSync(temporary, { force: true });
-    }
-    return before === "missing" ? "stored" : "restored";
-  }
-  list() {
-    const top = join2(this.root, "sha256");
-    const names = (path) => {
-      try {
-        return lstatSync(path).isDirectory() ? readdirSync(path) : [];
-      } catch {
-        return [];
-      }
-    };
-    return names(top).flatMap((two) => names(join2(top, two)).filter((n) => /^[0-9a-f]{64}$/.test(n) && n.startsWith(two))).sort();
-  }
+  return;
 }
 
 // packages/workspace/src/index.ts
 function findProject(start) {
-  for (let dir = resolve2(start);; dir = dirname3(dir)) {
-    if (existsSync3(join3(dir, "stemma.json")))
+  for (let dir = resolve(start);; dir = dirname2(dir)) {
+    if (existsSync2(join3(dir, "stemma.json")))
       return dir;
-    if (dirname3(dir) === dir)
+    if (dirname2(dir) === dir)
       return;
   }
 }
@@ -109290,9 +112404,11 @@ function readProject(root) {
   const content = {
     settings: sourceFile(root, "stemma.json"),
     records: listFiles(root, "records"),
-    manuscript: listFiles(root, "manuscript")
+    sources: listFiles(root, "sources"),
+    manuscript: listFiles(root, "manuscript"),
+    research: listFiles(root, "research")
   };
-  if (existsSync3(join3(root, "rules.md")))
+  if (existsSync2(join3(root, "rules.md")))
     content.rules = sourceFile(root, "rules.md");
   return content;
 }
@@ -109300,26 +112416,26 @@ function readProject(root) {
 class UnsafePath extends Error {
 }
 var inside = (root, path) => {
-  const rel = relative2(root, path);
-  return rel === "" || !isAbsolute2(rel) && rel !== ".." && !rel.startsWith(`..${sep2}`);
+  const rel = relative(root, path);
+  return rel === "" || !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`);
 };
 function projectRelative(root, path) {
-  const full = resolve2(root, path);
-  const real = existsSync3(full) ? realpathSync2(full) : full;
-  const base = inside(root, full) ? root : realpathSync2(root);
+  const full = resolve(root, path);
+  const real = existsSync2(full) ? realpathSync(full) : full;
+  const base = inside(root, full) ? root : realpathSync(root);
   const target = inside(root, full) ? full : real;
   if (!inside(base, target))
     throw new UnsafePath(path);
-  return relative2(base, target).split(sep2).join("/");
+  return relative(base, target).split(sep).join("/");
 }
 function safeTarget(root, path) {
-  const full = resolve2(root, path);
+  const full = resolve(root, path);
   if (!inside(root, full))
     throw new UnsafePath(path);
-  let parent = dirname3(full);
-  while (!existsSync3(parent))
-    parent = dirname3(parent);
-  if (!inside(realpathSync2(root), realpathSync2(parent)))
+  let parent = dirname2(full);
+  while (!existsSync2(parent))
+    parent = dirname2(parent);
+  if (!inside(realpathSync(root), realpathSync(parent)))
     throw new UnsafePath(path);
   try {
     if (!lstatSync2(full).isFile())
@@ -109332,27 +112448,27 @@ function safeTarget(root, path) {
 }
 function writeProjectFile(root, path, text) {
   const full = safeTarget(root, path);
-  mkdirSync2(dirname3(full), { recursive: true });
-  const temporary = `${full}.${randomBytes2(6).toString("hex")}.tmp`;
+  mkdirSync2(dirname2(full), { recursive: true });
+  const temporary = `${full}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    writeFileSync(temporary, text, { flag: "wx" });
+    writeFileSync2(temporary, text, { flag: "wx" });
     renameSync2(temporary, full);
   } finally {
     rmSync2(temporary, { force: true });
   }
 }
 var BASE32 = "0123456789abcdefghjkmnpqrstvwxyz";
-var randomToken = () => Array.from(randomBytes2(20), (byte) => BASE32[byte % 32]).join("");
-var RULES = `# Standing rules
+var randomToken = () => Array.from(randomBytes(20), (byte) => BASE32[byte % 32]).join("");
+var RULES2 = `# Standing rules
 
 Write each rule under a level-two heading with a number that is never reused,
 for example "RULE-001 Spell the town as the charter does".
 `;
-var ATTRIBUTES = ["stemma.json", "rules.md", "records/**", "manuscript/**"].map((p) => `${p} text eol=lf`);
+var ATTRIBUTES = ["stemma.json", "rules.md", "records/**", "manuscript/**", "sources/**", "research/**/*.md"].map((p) => `${p} text eol=lf`);
 var IGNORED = [".stemma/", "build/"];
 function addLines(root, path, lines) {
   const full = safeTarget(root, path);
-  const present = existsSync3(full) ? readFileSync2(full, "utf8") : "";
+  const present = existsSync2(full) ? readFileSync2(full, "utf8") : "";
   const have = new Set(present.split(/\r?\n/));
   const missing = lines.filter((line) => !have.has(line));
   if (missing.length === 0)
@@ -109364,18 +112480,28 @@ function addLines(root, path, lines) {
 `);
   return true;
 }
+function writeSourceDirectory(root, directory, files) {
+  if (existsSync2(join3(root, directory)))
+    throw new UnsafePath(`${directory} already exists`);
+  const manifest = `${directory}/source.md`;
+  for (const file of files.filter((f) => f.path !== manifest))
+    writeProjectFile(root, file.path, file.text);
+  const last = files.find((f) => f.path === manifest);
+  if (last)
+    writeProjectFile(root, last.path, last.text);
+}
 
 class AlreadyInitialized extends Error {
 }
 function initProject(root) {
-  if (existsSync3(join3(root, "stemma.json")))
+  if (existsSync2(join3(root, "stemma.json")))
     throw new AlreadyInitialized(root);
   mkdirSync2(join3(root, "records"), { recursive: true });
   mkdirSync2(join3(root, "manuscript"), { recursive: true });
   const project_id = randomToken();
   const written = [];
-  if (!existsSync3(join3(root, "rules.md"))) {
-    writeProjectFile(root, "rules.md", RULES);
+  if (!existsSync2(join3(root, "rules.md"))) {
+    writeProjectFile(root, "rules.md", RULES2);
     written.push("rules.md");
   }
   if (addLines(root, ".gitattributes", ATTRIBUTES))
@@ -109386,11 +112512,16 @@ function initProject(root) {
   written.push("stemma.json");
   return { project_id, written };
 }
+
+// packages/cli/src/context.ts
+import { Database } from "bun:sqlite";
+import { readFileSync as readFileSync3, statSync as statSync2 } from "fs";
+import { resolve as resolve2 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.3",
-  description: "Create academically rigorous research reports and books. Research and write with Claude while scripts check your citations against your own stored copies and explain what they find. Claude sets up what the plugin needs.",
+  version: "0.0.4",
+  description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
     url: "https://github.com/DocumentDrivenDX"
@@ -109401,78 +112532,9 @@ var plugin_default = {
   skills: "./skills/"
 };
 
-// packages/cli/src/runtime.ts
-var PINNED_BUN = "1.4.5";
-var ISOLATION_FLAGS = ["--no-install", "--no-env-file", "--config=/dev/null"];
-var LAUNCHER_HELP = `Run it through the plugin's launcher, scripts/stemma.sh, which fetches and uses Bun ${PINNED_BUN}. Nothing was checked.`;
-function runtimeProblem(version, flags) {
-  if (version !== PINNED_BUN)
-    return `This is Bun ${version}; Stemma needs Bun ${PINNED_BUN}. ${LAUNCHER_HELP}`;
-  if (!flags.includes("--no-install")) {
-    return `Bun was started without --no-install, so it could download packages while running. Start it as: bun ${ISOLATION_FLAGS.join(" ")} <plugin root>/dist/stemma.js. Nothing was checked.`;
-  }
-  return;
-}
-
-// packages/cli/src/main.ts
+// packages/cli/src/context.ts
 var VERSION = plugin_default.version;
-var REPORT_PATH = ".stemma/reports/check.json";
-var USAGE = `stemma ${VERSION}
-The plugin runs this through its launcher: sh scripts/stemma.sh <data directory> <command> [options]
-
-  version
-  doctor
-  init --project <dir>
-  record add <kind> --input <file|-> [--actor <person|model|software>:<name>]
-  validate [paths]
-  fmt [paths]
-  rules check
-  check [--changed | --all]
-  source add <file> --acquired-at <time> --actor <kind>:<name> [--source <id>] [--origin <text>]
-             [--source-version <text>] [--unpublished yes|no] [--community-restricted yes|no] [--license <text>]
-  source pages <capture id> [--text-layer <file>] [--page-numbers <file>] [--out <file>]
-  source text <capture id> --actor <kind>:<name> [--text-layer <file>] [--page-map <file>]
-             [--method text_layer|ocr|manual] [--tool <name> --tool-version <version>] [--note <text>]
-  excerpt --source <id> --pages <printed pages> | --passage <id>
-  retire <record id...> --reason <text> --actor <kind>:<name> [--replaced-by <id>]
-  store verify [--unreferenced]
-
-Options: --project <dir> (default: nearest ancestor holding stemma.json), --format text|json,
---store-dir <dir> (private content store; else STEMMA_STORE_DIR, else a per-user directory)
-Exit codes: 0 done, nothing open; 1 done, findings open; 2 usage or not implemented;
-3 project unreadable; 4 wrong runtime; 5 request not valid; 70 internal error.
-`;
-var NOT_YET = new Set([
-  "migrate",
-  "capture",
-  "key",
-  "resolve",
-  "unreviewed",
-  "reviewed",
-  "rounds",
-  "review",
-  "support",
-  "annotate",
-  "import",
-  "export",
-  "takeover",
-  "index",
-  "research",
-  "setup",
-  "log",
-  "activity",
-  "plan",
-  "voice",
-  "audit",
-  "checkpoint",
-  "authorship",
-  "restricted",
-  "build",
-  "disclosure",
-  "scan",
-  "graph",
-  "map"
-]);
+var USER_AGENT = `stemma/${VERSION}`;
 
 class CommandError extends Error {
   exit;
@@ -109485,24 +112547,26 @@ class CommandError extends Error {
     this.paths = paths;
   }
 }
-var usage = (message) => new CommandError(2, "usage", `${message}
-
-${USAGE}`);
-var COMMAND_OPTIONS = {
-  "source add": ["actor", "source", "origin", "acquired-at", "source-version", "unpublished", "community-restricted", "license"],
-  "source text": ["actor", "text-layer", "page-map", "method", "tool", "tool-version", "note"],
-  "source pages": ["text-layer", "page-numbers", "out"],
-  "store verify": ["unreferenced"],
-  excerpt: ["source", "passage", "pages"],
-  retire: ["actor", "reason", "replaced-by"],
-  "record add": ["actor", "input"],
-  check: ["changed", "all"]
+var sqliteVersion = () => {
+  const database = new Database(":memory:");
+  try {
+    return database.query("select sqlite_version() as v").get().v;
+  } finally {
+    database.close();
+  }
 };
+var tools = () => ({
+  stemma: VERSION,
+  bun: Bun.version,
+  sqlite: sqliteVersion(),
+  "stemma-convert": CONVERTER_VERSION,
+  "pdfjs-dist": PDFJS_VERSION
+});
 function emit(options, json, text) {
   process.stdout.write(options.format === "json" ? canonical(json) : text);
 }
 function requireProject(options) {
-  const root = options.project ? resolve3(options.project) : findProject(process.cwd());
+  const root = options.project ? resolve2(options.project) : findProject(process.cwd());
   if (!root)
     throw new CommandError(3, "no_project", "No stemma.json was found here or above. Pass --project <dir>, or run init.");
   return root;
@@ -109518,84 +112582,30 @@ function openCorpus(root) {
   }
   return corpus;
 }
-var sqliteVersion = () => {
-  const database = new Database(":memory:");
-  try {
-    return database.query("select sqlite_version() as v").get().v;
-  } finally {
-    database.close();
-  }
-};
-var tools = () => ({ stemma: VERSION, bun: Bun.version, sqlite: sqliteVersion() });
-function version(options) {
-  emit(options, { stemma: VERSION, bun_pinned: PINNED_BUN }, `stemma ${VERSION} (needs Bun ${PINNED_BUN})
-`);
-  return 0;
+var usageError = (message) => new CommandError(2, "usage", `${message}
+Run with --help to see every command.`);
+function actorOf(options) {
+  const named = /^(person|model|software):(.+)$/.exec(options.actor ?? "");
+  if (options.actor !== undefined && !named)
+    throw usageError("--actor is person:<name>, model:<name> or software:<name>.");
+  return named ? { kind: named[1], name: named[2] } : undefined;
 }
-function storeLines(store) {
-  if ("note" in store)
-    return [`Content store: ${store.note}`];
-  return [
-    `Content store: ${store.path} (chosen by ${store.chosen_by}; ${store.exists ? "present" : "not created yet"})`,
-    ...store.refused ? [`WARNING: this location is refused: ${store.refused}.`] : [],
-    `Stored files: ${store.blobs_present} of ${store.blobs_named} that records name are present (not hashed here; \`store verify\` does that).${store.unread_records ? ` ${store.unread_records} record file(s) cannot be read.` : ""}`,
-    BACKUP_NOTICE
-  ];
+function requireActor(options, why) {
+  const actor = actorOf(options);
+  if (!actor)
+    throw usageError(`${why}: give --actor <person|model|software>:<name>.`);
+  return actor;
 }
-function gitVersion() {
+function namedFile(base, file, limit) {
+  if (file === undefined)
+    return;
+  const path = resolve2(base, file);
   try {
-    const done = Bun.spawnSync(["git", "--version"]);
-    if (done.exitCode === 0)
-      return `Besides Bun, ${done.stdout.toString().trim()} is asked only whether a content store inside a git working tree is ignored.`;
+    const stat = statSync2(path);
+    if (stat.isFile() && stat.size <= limit)
+      return new Uint8Array(readFileSync3(path));
   } catch {}
-  return "git was not found. Besides Bun it is used only for a content store inside a git working tree, which is then refused.";
-}
-function doctor(options) {
-  const flags = Object.fromEntries(ISOLATION_FLAGS.map((f) => [f, process.execArgv.includes(f)]));
-  const project = options.project ? resolve3(options.project) : findProject(process.cwd());
-  const info = {
-    ...tools(),
-    bun_pinned: PINNED_BUN,
-    bun_path: process.execPath,
-    bundle_path: Bun.main,
-    working_directory: process.cwd(),
-    project: project ?? "",
-    start_flags: flags,
-    platform: `${process.platform}-${process.arch}`,
-    platform_status: "Development tests have run on macOS (Apple silicon) only. No release has been observed on any system; other systems and desktop apps are untested.",
-    external_tools: gitVersion(),
-    source_limits: LIMITS,
-    store: project && existsSync4(join4(project, "stemma.json")) ? storeStatus(project, options) : { note: "No project, so no content store." }
-  };
-  const missing = ISOLATION_FLAGS.filter((f) => !flags[f]);
-  const lines = [
-    `stemma ${info.stemma}`,
-    `Bun ${info.bun} (pinned ${PINNED_BUN}) at ${info.bun_path}`,
-    `SQLite ${info.sqlite}`,
-    `Command line: ${info.bundle_path}`,
-    `Working directory: ${info.working_directory}`,
-    `Project: ${info.project || "none found"}`,
-    `Platform: ${info.platform}. ${info.platform_status}`,
-    info.external_tools,
-    ...storeLines(info.store),
-    `Limits on added files: ${LIMITS.input_bytes / 1048576} MiB for a copy, ${LIMITS.text_bytes / 1048576} MiB and ${LIMITS.pages} pages for its text.`,
-    missing.length === 0 ? "Start flags: no run-time downloads, and no .env or bunfig.toml is loaded." : `WARNING: started without ${missing.join(" ")}. A .env or bunfig.toml in the working directory could run code or change settings.`
-  ];
-  emit(options, info, `${lines.join(`
-`)}
-`);
-  return 0;
-}
-function init(options) {
-  if (!options.project)
-    throw usage("init needs --project <dir>.");
-  const root = resolve3(options.project);
-  const made = initProject(root);
-  emit(options, { project: root, ...made }, `Created a Stemma project in ${root}
-${made.written.map((f) => `  wrote ${f}`).join(`
-`)}
-`);
-  return 0;
+  throw new InvalidInput(`${file} cannot be read, is not a regular file, or is over the size limit.`);
 }
 function reportRecords(options, results, head, extra) {
   const open = results.filter((r) => r.open);
@@ -109606,204 +112616,133 @@ function reportRecords(options, results, head, extra) {
   emit(options, { ...extra, results }, `${head}${body}`);
   return open.length > 0 ? 1 : 0;
 }
-function actorOf(options) {
-  const named = /^(person|model|software):(.+)$/.exec(options.actor ?? "");
-  if (options.actor !== undefined && !named)
-    throw usage("--actor is person:<name>, model:<name> or software:<name>.");
-  return named ? { kind: named[1], name: named[2] } : undefined;
-}
-var unsafeStore = (path, why) => new CommandError(5, "unsafe_store", `The content store cannot be ${path}: ${why}. Nothing was stored or read there.`, [path]);
-function openStore(root, corpus, options) {
-  const location = storeLocation(root, corpus.settings.data?.project_id, options["store-dir"]);
-  const why = storeProblem(root, location.path);
-  if (why)
-    throw unsafeStore(location.path, why);
-  return { store: new BlobStore(location.path), ...location };
-}
-var BACKUP_NOTICE = "The content store is private, apart from the repository, and Stemma never copies it anywhere: backing it up is your task.";
-var MODEL_NOTICE = "Stemma holds back no source: any source in this project may be sent to a hosted model.";
-function sourceAdd(options, file) {
-  if (!file)
-    throw usage("source add needs a file.");
-  if (/^[a-z][a-z0-9+.-]+:\/\//i.test(file)) {
-    throw new CommandError(2, "not_implemented", "Adding from a web address is not implemented in this version. Nothing was fetched. Add a file instead.");
-  }
-  const actor = actorOf(options);
-  if (!actor)
-    throw usage("source add records who added the copy: give --actor.");
-  if (!options["acquired-at"]) {
-    throw usage("source add records when you got the copy and does not guess it: give --acquired-at, for example 2026-01-05T09:58:00Z.");
-  }
-  const flag = (name) => {
-    const value = options[name];
-    if (value !== undefined && value !== "yes" && value !== "no")
-      throw usage(`--${name} is yes or no.`);
-    return value === undefined ? undefined : value === "yes";
-  };
-  const rights = { unpublished: flag("unpublished"), community_restricted: flag("community-restricted"), license: options.license };
-  const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const { store, path } = openStore(root, corpus, options);
-  const from = resolve3(root, file);
-  const found = inspectSourceFile(from, LIMITS.input_bytes);
-  const plan = planAddSource(corpus, {
-    ...found,
-    acquired_at: options["acquired-at"],
-    rights: Object.fromEntries(Object.entries(rights).filter(([, v]) => v !== undefined)),
-    ...options.source === undefined ? {} : { source: options.source },
-    ...options.origin === undefined ? {} : { origin: options.origin },
-    ...options["source-version"] === undefined ? {} : { source_version: options["source-version"] },
-    actor,
-    now: new Date,
-    token: randomToken
-  });
-  const existing = new Set(readProject(root).records.map((f) => f.path));
-  if (plan.state === "add" && existing.has(plan.capture.path))
-    throw new InvalidInput(`${plan.capture.path} already exists.`);
-  const stored = store.put({ file: from }, found.sha256);
-  for (const record of plan.records)
-    writeProjectFile(root, record.path, record.text);
-  const capture = plan.state === "add" ? plan.capture.id : plan.capture;
-  const wrote = new Set(plan.records.map((r) => r.path));
-  const results = validateFiles(openCorpus(root), wrote);
-  const head = [
-    plan.state === "add" ? `Stored the copy and recorded it as ${capture}.` : `This source already has this copy (${capture}); no second record was written.`,
-    `  source: ${plan.source}${plan.state === "add" && plan.new_source ? " (new, a candidate; it has no citation key yet)" : ""}`,
-    `  sha256: ${found.sha256} (${found.size} bytes, ${found.media_type})`,
-    `  store: ${path} (${stored === "present" ? "already held these bytes" : stored === "restored" ? "a damaged blob was replaced by matching bytes" : "stored and verified"})`,
-    ...plan.state === "add" ? [
-      `  origin: ${options.origin ?? "unknown"}`,
-      `  acquired at: ${options["acquired-at"]}`,
-      `  version: ${options["source-version"] ?? "unknown"}`,
-      `  added by: ${actor.kind} ${actor.name} (a record of what was said, not proof)`
-    ] : [],
-    ...plan.records.map((r) => `  wrote ${r.path}`),
-    BACKUP_NOTICE,
-    MODEL_NOTICE,
-    `Next: attach its text with \`source text ${capture}\`.`
-  ].join(`
-`);
-  return reportRecords(options, results, `${head}
-`, {
-    source: plan.source,
-    capture,
-    state: plan.state,
-    store: path,
-    blob: stored,
-    ...found,
-    notices: [BACKUP_NOTICE, MODEL_NOTICE]
-  });
-}
-function named(root, file, limit) {
-  if (file === undefined)
-    return;
-  const path = resolve3(root, file);
-  try {
-    const stat = statSync2(path);
-    if (stat.isFile() && stat.size <= limit)
-      return new Uint8Array(readFileSync3(path));
-  } catch {}
-  throw new InvalidInput(`${file} cannot be read, is not a regular file, or is over the size limit.`);
-}
+var written = (root, paths) => validateFiles(openCorpus(root), new Set(paths));
+
+// packages/cli/src/ingest.ts
+import { dirname as dirname3, resolve as resolve4 } from "path";
+import { createHash as createHash4 } from "crypto";
+
+// packages/cli/src/sources.ts
+import { createHash as createHash3 } from "crypto";
+import { writeFileSync as writeFileSync3 } from "fs";
+import { resolve as resolve3 } from "path";
+
+// packages/cli/src/conversion.ts
 var PDF_PROBLEMS = {
   encrypted: "This PDF is encrypted and needs a password, so it was not read.",
   damaged: "This PDF is damaged or is not a PDF the reader can take, so it was not read.",
-  too_many_pages: `This PDF has more than the limit of ${LIMITS.pages} pages, so it was not read.`,
-  too_much_text: `This PDF's text is larger than the limit of ${LIMITS.text_bytes / 1048576} MiB, so it was not saved.`,
-  too_slow: `Reading this PDF passed the time limit of ${LIMITS.extraction_seconds} seconds, so it was stopped.`
+  too_many_pages: `This PDF has more than the limit of ${LIMITS.parts} pages, so it was not read.`,
+  too_much_text: `This PDF's text is larger than the limit of ${LIMITS.text_bytes / 1048576} MiB, so it was not converted.`,
+  too_slow: `Reading this PDF passed the time limit of ${LIMITS.conversion_seconds} seconds, so it was stopped.`
 };
-async function readCopy(copy) {
+async function readPdfCopy(bytes) {
   try {
-    return await readPdf(copy, { pages: LIMITS.pages, text_bytes: LIMITS.text_bytes, milliseconds: LIMITS.extraction_seconds * 1000 });
+    return await readPdf(bytes, { pages: LIMITS.parts, text_bytes: LIMITS.text_bytes, milliseconds: LIMITS.conversion_seconds * 1000 });
   } catch (error) {
     if (!(error instanceof PdfUnreadable))
       throw error;
-    throw new InvalidInput(`${PDF_PROBLEMS[error.problem]} No extraction was saved, and this copy does not count as checkable.`);
+    throw new InvalidInput(`${PDF_PROBLEMS[error.problem]}`);
   }
 }
-function heldCopy(options, capture) {
-  const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const held = corpus.byId.get(capture)?.data;
-  if (held?.kind !== "capture" || typeof held.sha256 !== "string" || !/^[0-9a-f]{64}$/.test(held.sha256)) {
-    throw new InvalidInput(`No usable capture record has the ID ${capture}.`);
-  }
-  const { store, path } = openStore(root, corpus, options);
-  const copy = store.get(held.sha256);
-  if (!copy) {
-    throw new CommandError(5, "copy_not_held", `The stored copy ${held.sha256} is missing from ${path} or does not match its digest, so no text can be tied to it. Restore it, or add the same file again.`, [path]);
-  }
-  return { root, corpus, store, copy, media_type: String(held.media_type) };
+function proposalFor(pages, embedded, pageNumbers) {
+  const claimed = [];
+  if (pageNumbers)
+    claimed.push({ from: "the supplied page-number data", labels: parsePageNumbers(pageNumbers) });
+  if (embedded)
+    claimed.push({ from: "the labels stated inside the PDF", labels: new Map(embedded.flatMap((l, i) => l ? [[i, l]] : [])) });
+  return proposePageMap(pages, claimed);
 }
-async function sourceText(options, capture) {
-  if (!capture)
-    throw usage("source text needs a capture ID.");
-  const actor = actorOf(options);
-  if (!actor)
-    throw usage("source text records who attached the text: give --actor.");
-  const { method, tool } = options;
-  if (method !== undefined && !["text_layer", "ocr", "manual"].includes(method))
-    throw usage("--method is text_layer, ocr or manual.");
-  if (tool === undefined !== (options["tool-version"] === undefined))
-    throw usage("Give --tool and --tool-version together.");
-  const { root, corpus, store, copy, media_type } = heldCopy(options, capture);
-  const layer = named(root, options["text-layer"], LIMITS.text_bytes);
-  const pageMap = named(root, options["page-map"], LIMITS.page_map_bytes);
-  const read = media_type === "application/pdf" && !layer ? await readCopy(copy) : undefined;
-  const plan = planSourceText(corpus, {
-    capture,
-    copy,
-    ...layer ? { layer } : {},
-    ...read ? { read: { pages: read.pages, tool: read.tool } } : {},
-    ...pageMap ? { pageMap } : {},
-    ...method ? { method } : {},
-    ...tool ? { tool: { name: tool, version: options["tool-version"] } } : {},
-    ...options.note ? { note: options.note } : {},
-    stemma: VERSION,
-    actor,
-    now: new Date,
-    token: randomToken
-  });
-  if (readProject(root).records.some((f) => f.path === plan.record.path))
-    throw new InvalidInput(`${plan.record.path} already exists.`);
-  store.put({ bytes: plan.text }, plan.text_sha256);
-  writeProjectFile(root, plan.record.path, plan.record.text);
-  const pages = plan.pages === 0 ? ["  pages: none (plain text without page breaks)"] : [
-    `  pages: ${plan.pages}, split at the form feeds in the text`,
-    `  without a printed label (file page indexes, from 0): ${plan.unmapped.length === 0 ? "none" : ranges(plan.unmapped)}. No label is worked out from a page's position.`
+function autoNotes(proposal, dropped) {
+  const seen = proposal.runs.reduce((n, r) => n + r.seen, 0);
+  const total = proposal.runs.reduce((n, r) => n + r.pages, 0);
+  return [
+    proposal.runs.length === 0 ? "No run of printed page numbers was found, so no page is labelled." : `Page labels were proposed from the numbers printed in the pages' own text (the number is seen on ${seen} of ${total} labelled-run pages) and were not compared with page images by this conversion.`,
+    ...dropped.length > 0 ? [`${dropped.length} run(s) repeating labels of a longer run were left unlabelled (page indexes ${dropped.map((s) => `${s.first_index}-${s.last_index}`).join(", ")}).`] : [],
+    ...proposal.comparisons.map((c) => `Compared with ${c.from}: the same label on ${c.agree} proposed page(s), another on ${c.differ.length}.`)
   ];
-  const empty = plan.empty.length === 0 ? [] : [
-    `  with no text at all (file page indexes): ${ranges(plan.empty)}. Nothing on those pages can be checked; a scanned page needs character recognition, which Stemma does not do.`
-  ];
-  const supplied = read ? [
-    `Read from the PDF's own text layer with ${read.tool.name} ${read.tool.version}. The text was not compared with the page images: a text layer made by character recognition can be wrong, and columns, footnotes and running heads can come out of order.`,
-    ...plan.unmapped.length > 0 && !pageMap ? [`To label pages, run \`source pages ${capture}\`, review the proposed page map against the page images, then attach the text again with --page-map.`] : []
-  ] : plan.method === "born_text" ? [] : [
-    "Stemma did not make this text and did not compare it with the copy, page by page or at all: that it is the copy's text, with the pages in step, rests on what you supplied."
-  ];
-  const head = [
-    `Saved the text as ${plan.record.id}.`,
-    `  method: ${plan.method}, quality unassessed`,
-    `  sha256: ${plan.text_sha256} (${plan.text.length} bytes)`,
-    ...pages,
-    ...empty,
-    `  wrote ${plan.record.path}`,
-    ...supplied
-  ].join(`
-`);
-  return reportRecords(options, validateFiles(openCorpus(root), new Set([plan.record.path])), `${head}
-`, {
-    extraction: plan.record.id,
-    text_sha256: plan.text_sha256,
-    pages: plan.pages,
-    empty: plan.empty,
-    unmapped: plan.unmapped,
-    method: plan.method
+}
+async function convertOriginal(original, options) {
+  try {
+    if (original.media_type === "application/pdf") {
+      const read = await readPdfCopy(original.bytes);
+      let segments = options.pageMap;
+      let notes = [];
+      if (!segments && options.autoPages) {
+        const proposal = proposalFor(read.pages, read.embeddedLabels, options.pageNumbers);
+        const chosen = autoSegments(proposal);
+        segments = chosen.segments;
+        notes = autoNotes(proposal, chosen.dropped);
+      }
+      const blank = read.pages.map((_, index) => ({ index, label: { status: "undetermined" } }));
+      const labels = options.labels ?? new Map(applyPageMap(blank, segments ?? []).map((p) => [p.index, p.label]));
+      const converted = convertPdf(read, { recognized: options.recognized === true, labels });
+      return { converted: { ...converted, notes: [...converted.notes, ...notes] }, notes };
+    }
+    const converted = convertMarkupOrText(original.bytes, original.media_type);
+    if (options.pageMap) {
+      if (!converted.paged)
+        throw new InvalidInput("This text has no pages, so there are no pages to label.");
+      converted.parts = applyPageMap(converted.parts, options.pageMap);
+    }
+    return { converted, notes: [] };
+  } catch (error) {
+    if (error instanceof Unconvertible)
+      throw new InvalidInput(`${error.message} No source file was written.`);
+    throw error;
+  }
+}
+function suppliedPages(bytes, method, tool) {
+  const text = normalizeText(new TextDecoder("utf-8", { fatal: true }).decode(bytes)).replace(/\0/g, "");
+  const pages = text.split("\f");
+  if (pages.length > 1 && !/\S/u.test(pages.at(-1)))
+    pages.pop();
+  if (!pages.some((p) => /\S/u.test(p)))
+    throw new InvalidInput("There is no machine-readable text: it is empty or only white space.");
+  return withoutStamps({
+    paged: true,
+    coverage: "all",
+    identity: {},
+    method,
+    tools: [tool ?? { name: "unknown", version: "unknown" }, converterTool],
+    notes: ["The text was supplied; Stemma did not make it and did not compare it with the original."],
+    parts: pages.map((page, index) => {
+      const trimmed = page.replace(/^\n+|\n+$/g, "");
+      return {
+        index,
+        label: { status: "undetermined" },
+        columns: "undetermined",
+        undetermined: ["paragraphs", "headings", "footnotes", "block-quotes", "tables", "captions", "figures", "running-heads", "folio"],
+        blocks: trimmed.trim() ? [textBlock("undetermined", trimmed)] : []
+      };
+    })
   });
 }
-var shortList = (indexes) => {
-  const all = ranges(indexes);
-  return all.length > 200 ? `${all.slice(0, all.lastIndexOf(",", 200))}, and more (see --format json)` : all || "none";
+
+// packages/cli/src/sources.ts
+var MODEL_NOTICE = "Stemma holds back no source: any source in this project may be sent to a hosted model.";
+var TIME2 = /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/;
+var only = (value, allowed, flag) => {
+  if (value !== undefined && !allowed.includes(value))
+    throw usageError(`--${flag} is one of ${allowed.join(", ")}.`);
+  return value;
+};
+var readJson = (bytes, what) => {
+  try {
+    const { value } = parseJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+    if (isObject(value))
+      return value;
+  } catch {}
+  throw new InvalidInput(`${what} is not one readable JSON object.`);
+};
+var shortRanges = (indexes) => {
+  const out = [];
+  for (let i = 0, j = 0;i < indexes.length; i = j + 1) {
+    for (j = i;indexes[j + 1] === indexes[j] + 1; j++)
+      ;
+    out.push(i === j ? `${indexes[i]}` : `${indexes[i]}-${indexes[j]}`);
+  }
+  const all = out.join(", ") || "none";
+  return all.length > 200 ? `${all.slice(0, all.lastIndexOf(",", 200))}, and more (see --format json)` : all;
 };
 function proposalText(proposal) {
   const lines = [
@@ -109813,57 +112752,948 @@ function proposalText(proposal) {
   ].filter(Boolean);
   for (const run of proposal.runs) {
     const { first_index, last_index, first_label, style } = run.segment;
-    lines.push(`  file indexes ${first_index}-${last_index}: printed ${first_label} onwards (${style}). Number seen on ${run.seen} of ${run.pages} pages.`, ...run.unseen.length > 0 ? [`    not seen in the text at indexes ${shortList(run.unseen)}`] : []);
+    lines.push(`  file indexes ${first_index}-${last_index}: printed ${first_label} onwards (${style}). Number seen on ${run.seen} of ${run.pages} pages.`, ...run.unseen.length > 0 ? [`    not seen in the text at indexes ${shortRanges(run.unseen)}`] : []);
   }
-  lines.push(`  left without a label: ${shortList(proposal.unmapped)}`);
+  lines.push(`  left without a label: ${shortRanges(proposal.unmapped)}`);
   if (proposal.repeated_labels.length > 0) {
     lines.push(`WARNING: ${proposal.repeated_labels.length} label(s) would name more than one page, from ${proposal.repeated_labels[0]} on. One file can hold a second numbering, such as a publisher's list bound at the back. Look at the pages, and keep only the runs that number the work you cite.`);
   }
   for (const c of proposal.comparisons) {
-    lines.push(`Compared with ${c.from}: the same label on ${c.agree} proposed page(s), another on ${c.differ.length}${c.differ.length > 0 ? ` (indexes ${shortList(c.differ)})` : ""}.`, ...c.only_there.length > 0 ? [
-      `  It also labels ${c.only_there.length} page(s) outside the proposed runs (indexes ${shortList(c.only_there.map((o) => o.page_index))}). These are not proposed, because the text does not bear them out.`
-    ] : []);
+    lines.push(`Compared with ${c.from}: the same label on ${c.agree} proposed page(s), another on ${c.differ.length}${c.differ.length > 0 ? ` (indexes ${shortRanges(c.differ)})` : ""}.`, ...c.only_there.length > 0 ? [`  It also labels ${c.only_there.length} page(s) outside the proposed runs (indexes ${shortRanges(c.only_there.map((o) => o.page_index))}). These are not proposed, because the text does not bear them out.`] : []);
   }
   return lines;
 }
-async function sourcePages(options, capture) {
-  if (!capture)
-    throw usage("source pages needs a capture ID.");
-  const { root, copy, media_type } = heldCopy(options, capture);
-  const layer = named(root, options["text-layer"], LIMITS.text_bytes);
-  const numbers = named(root, options["page-numbers"], LIMITS.page_map_bytes);
-  const claimed = [];
-  if (numbers)
-    claimed.push({ from: "the supplied page-number data", labels: parsePageNumbers(numbers) });
+async function sourcePages(options, file) {
+  if (!file)
+    throw usageError("source pages needs an original file.");
+  const base = options.project ? resolve3(options.project) : process.cwd();
+  const original = readOriginal(resolve3(base, file), LIMITS.input_bytes);
+  const layer = namedFile(base, options["text-layer"], LIMITS.text_bytes);
   let pages;
-  if (layer || media_type !== "application/pdf") {
-    const text = normalizeText(new TextDecoder().decode(layer ?? copy));
-    const points = [...text];
-    pages = pageSpans(text).map((s) => points.slice(s.start, s.end).join(""));
+  let embedded;
+  if (layer || original.media_type !== "application/pdf") {
+    const text = normalizeText(new TextDecoder().decode(layer ?? original.bytes));
+    pages = text.split("\f");
   } else {
-    const read = await readCopy(copy);
-    pages = read.pages;
-    if (read.embeddedLabels)
-      claimed.push({ from: "the labels stated inside the PDF", labels: new Map(read.embeddedLabels.flatMap((l, i) => l ? [[i, l]] : [])) });
+    const read = await readPdfCopy(original.bytes);
+    [pages, embedded] = [read.pages, read.embeddedLabels];
   }
-  const proposal = proposePageMap(pages, claimed);
-  const map = canonical(proposal.runs.map((r) => r.segment));
-  let written = "";
+  const proposal = proposalFor(pages, embedded, namedFile(base, options["page-numbers"], LIMITS.page_map_bytes));
+  let out = "";
   if (options.out) {
-    written = resolve3(root, options.out);
+    out = resolve3(base, options.out);
     try {
-      writeFileSync2(written, map, { flag: "wx" });
+      writeFileSync3(out, canonical(proposal.runs.map((r) => r.segment)), { flag: "wx" });
     } catch {
       throw new InvalidInput(`${options.out} could not be written; an existing file is never overwritten.`);
     }
   }
-  const text = [
+  emit(options, { proposal, ...out ? { written: out } : {} }, `${[
     ...proposalText(proposal),
-    "Before using it, look at the page images at the ends of each run and at any page that differs. A person or Claude may edit the file; a label that rests on a person's word has the evidence author_statement.",
-    written ? `Wrote the proposed map to ${written}. Attach it with: source text ${capture} --page-map <that file>.` : "Add --out <file> to save the proposed map."
-  ];
-  emit(options, { capture, proposal, ...written ? { written } : {} }, `${text.join(`
+    "Look at the page images at the ends of each run and at any page that differs. A person may edit the file; a label that rests on a person's word has the evidence author_statement.",
+    out ? `Wrote the proposed map to ${out}. Use it with --page-map in source convert, or with source label.` : "Add --out <file> to save the proposed map."
+  ].join(`
 `)}
+`);
+  return 0;
+}
+async function convertAndWrite(request) {
+  const { root, corpus, originals, options, actor } = request;
+  const base = root;
+  const transcription = namedFile(base, options.transcription, LIMITS.text_bytes);
+  const layer = namedFile(base, options["text-layer"], LIMITS.text_bytes);
+  if (transcription && layer)
+    throw usageError("Give --transcription or --text-layer, not both.");
+  const supplied = transcription ?? layer;
+  const images = originals.filter((o) => IMAGE_TYPES.includes(o.media_type));
+  if (images.length > 0 && images.length !== originals.length)
+    throw new InvalidInput("Page images are captured on their own, without another file.");
+  const form = originals.length === 0 ? "physical" : images.length > 0 ? "page_images" : "file";
+  if (form !== "file" && !supplied) {
+    throw new InvalidInput(`${form === "physical" ? "A paper or other physical original" : "A page image"} has no text Stemma can read: supply a transcription made by a recognition tool you ran, or typed (--transcription or --text-layer).`);
+  }
+  if (form === "physical" && (!options.description || !options["held-at"]))
+    throw usageError("A physical original needs --description and --held-at.");
+  const method = only(options.method, ["born_text", "text_layer", "markup", "ocr", "manual"], "method");
+  if (options.tool === undefined !== (options["tool-version"] === undefined))
+    throw usageError("Give --tool and --tool-version together.");
+  const tool = options.tool ? { name: options.tool, version: options["tool-version"] } : undefined;
+  const pageMap = namedFile(base, options["page-map"], LIMITS.page_map_bytes);
+  const segments = pageMap ? parsePageMap(pageMap) : undefined;
+  let converted;
+  let notes = [];
+  const original = originals[0];
+  if (supplied) {
+    if (method !== "ocr" && method !== "manual")
+      throw usageError("A supplied text needs --method ocr (a recognition tool made it) or --method manual (a person typed it).");
+    if (method === "ocr" && !tool)
+      throw usageError("Name the recognition tool that made the text: --tool and --tool-version.");
+    try {
+      converted = transcription ? withoutStamps(parseTranscription(new TextDecoder().decode(transcription), method)) : suppliedPages(layer, method, tool);
+    } catch (error) {
+      if (error instanceof Unconvertible)
+        throw new InvalidInput(`${error.message} No source file was written.`);
+      throw error;
+    }
+    if (tool)
+      converted.tools = [tool, ...converted.tools.filter((t) => t.name !== "unknown" && t.name !== tool.name)];
+    if (method === "ocr")
+      converted.recognition = options.recognition ?? `${tool.name} ${tool.version}`;
+    const count = original?.media_type === "application/pdf" ? (await readPdfCopy(original.bytes)).pages.length : undefined;
+    if (count !== undefined && converted.parts.length === count && !transcription)
+      converted.page_count = count;
+    else {
+      delete converted.page_count;
+      converted.coverage = "partial";
+    }
+    if (segments) {
+      converted.parts = applyPageMap(converted.parts, segments);
+    } else if (options["auto-pages"])
+      throw usageError("--auto-pages reads a file's own text; give a page map for a supplied text.");
+  } else {
+    if (method === "manual")
+      throw usageError("--method manual describes a supplied text.");
+    const done = await convertOriginal(original, {
+      recognized: method === "ocr",
+      ...segments ? { pageMap: segments } : {},
+      ...options["auto-pages"] ? { autoPages: true } : {},
+      ...options["page-numbers"] ? { pageNumbers: namedFile(base, options["page-numbers"], LIMITS.page_map_bytes) } : {}
+    });
+    converted = done.converted;
+    notes = done.notes;
+    if (options.recognition)
+      converted.recognition = options.recognition;
+  }
+  const identityFile = namedFile(base, options.identity, 1 << 20);
+  const identity = request.identity ?? (identityFile ? readJson(identityFile, "The identity file") : undefined);
+  const tie = {
+    form,
+    files: originals.map((o, index) => ({ sha256: o.sha256, size: o.size, media_type: o.media_type, ...form === "page_images" ? { index } : {} })),
+    ...options.description ? { description: options.description } : {},
+    ...options["held-at"] ? { held_at: options["held-at"] } : {},
+    ...options.origin ? { obtained_from: options.origin } : {},
+    acquired_at: options["acquired-at"],
+    ...options["source-version"] ? { version: options["source-version"] } : {}
+  };
+  const plan = planSourceText(corpus, {
+    converted,
+    original: tie,
+    actor,
+    now: new Date,
+    token: randomToken,
+    ...options.source !== undefined ? { source: options.source } : {},
+    ...identity ? { identity } : {},
+    ...options["coverage-note"] ? { coverage_note: options["coverage-note"] } : {},
+    ...options.note ? { note: options.note } : {},
+    ...options.name ? { name: options.name } : {}
+  });
+  for (const record of plan.records)
+    writeProjectFile(root, record.path, record.text);
+  writeSourceDirectory(root, plan.directory, plan.files);
+  const labelled = converted.parts.filter((p) => p.label.status === "labelled").length;
+  return { plan, converted, notes, labelled };
+}
+async function sourceConvert(options, files) {
+  const actor = requireActor(options, "source convert records who captured the original");
+  if (!options["acquired-at"] || !TIME2.test(options["acquired-at"])) {
+    throw usageError("source convert records when you got the original and does not guess it: give --acquired-at, for example 2026-01-05T09:58:00Z.");
+  }
+  if (files.some((f) => /^[a-z][a-z0-9+.-]+:\/\//i.test(f)))
+    throw usageError("source convert reads files. To fetch from a web address, list it in an ingest plan.");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const originals = [...files, ...options.image ?? []].map((f) => readOriginal(resolve3(root, f), LIMITS.input_bytes));
+  const { plan, converted, labelled } = await convertAndWrite({ root, corpus, originals, options, actor });
+  const unit = plan.paged ? "page" : "section";
+  const head = [
+    `Wrote the source file ${plan.text} to ${plan.directory}/`,
+    `  source: ${plan.source}${plan.new_source ? " (new, a candidate; it has no citation key yet)" : ""}`,
+    ...originals.map((o) => `  original: sha256 ${o.sha256} (${o.size} bytes, ${o.media_type}); it is not kept in the project`),
+    ...originals.length === 0 ? ["  original: physical, described in the manifest"] : [],
+    `  ${plan.parts} ${unit} file(s); method ${converted.method}, quality unassessed`,
+    ...plan.paged ? [`  pages with a printed label: ${labelled} of ${plan.parts}`] : ["  this text has no pages; cite it by chapter or paragraph. No page number is given to it."],
+    ...converted.notes.map((n) => `  note: ${printable(n)}`),
+    "The text was not compared with the original beyond this conversion.",
+    MODEL_NOTICE
+  ].join(`
+`);
+  return reportRecords(options, written(root, [`${plan.directory}/source.md`, ...plan.records.map((r) => r.path)]), `${head}
+`, {
+    source: plan.source,
+    text: plan.text,
+    directory: plan.directory,
+    parts: plan.parts,
+    paged: plan.paged,
+    labelled,
+    method: converted.method
+  });
+}
+function sourceLabel(options, text) {
+  if (!text || !options["page-map"])
+    throw usageError("source label needs a source file ID and --page-map <file>.");
+  const actor = requireActor(options, "source label records who set the labels");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const plan = planLabel(corpus, text, parsePageMap(namedFile(root, options["page-map"], LIMITS.page_map_bytes)), actor, new Date);
+  for (const file of plan.files)
+    writeProjectFile(root, file.path, file.text);
+  emit(options, { text, changed: plan.changed }, `Changed the page labels of ${plan.changed} page file(s). The words are unchanged.
+`);
+  return 0;
+}
+function sourceSeal(options, text) {
+  if (!text)
+    throw usageError("source seal needs a source file ID.");
+  const actor = requireActor(options, "source seal records who made the edit");
+  const root = requireProject(options);
+  const plan = planSeal(openCorpus(root), text, actor, new Date, tools(), options.note);
+  for (const file of plan.files)
+    writeProjectFile(root, file.path, file.text);
+  const list = (what, ids) => ids.length > 0 ? [`${what}: ${ids.join(", ")}`] : [];
+  emit(options, plan, `${plan.edited.length === 0 ? "No part differs from the manifest, so nothing was sealed." : [
+    `Sealed the edits to the parts at index ${shortRanges(plan.edited)}.`,
+    ...list("Reviews now stale", plan.stale_reviews),
+    ...list("Comparisons now stale", plan.stale_runs),
+    ...list("Passages on a changed page, listed by `check`", plan.changed_passages)
+  ].join(`
+`)}
+`);
+  return 0;
+}
+async function reconvert(root, corpus, id, original, actor, standing) {
+  const text = corpus.texts.get(id);
+  if (!text)
+    throw new InvalidInput(`No readable source file has the ID ${id}.`);
+  const data = text.manifest.data;
+  const tie = data.original;
+  const files = (Array.isArray(tie.files) ? tie.files : []).filter(isObject);
+  if (!files.some((f) => f.sha256 === original.sha256)) {
+    throw new InvalidInput(`That file's digest, ${original.sha256}, is not the original this source file was converted from.`);
+  }
+  const conversion = data.conversion;
+  const used = conversion.tools.map((t) => String(t.name));
+  const reconvertible = original.media_type === "application/pdf" ? used.includes("pdfjs-dist") : !IMAGE_TYPES.includes(original.media_type) && ["born_text", "markup"].includes(String(conversion.method));
+  if (!reconvertible)
+    return { reconvertible: false };
+  const labels = new Map(text.parts.map((p) => [p.index, {
+    status: String(p.front.label_status),
+    ...typeof p.front.label === "string" ? { label: p.front.label } : {}
+  }]));
+  const { converted } = await convertOriginal(original, { recognized: conversion.method === "ocr", labels });
+  const other = new Map(converted.parts.map((p) => [p.index, asConverted(p.blocks)]));
+  const plan = planComparison(corpus, {
+    text: id,
+    method: "reconversion",
+    other,
+    independent: false,
+    original_sha256: original.sha256,
+    against: "a fresh conversion of the original with the recorded settings",
+    tools: [{ name: "stemma-convert", version: CONVERTER_VERSION }, ...original.media_type === "application/pdf" ? [{ name: "pdfjs-dist", version: PDFJS_VERSION }] : []],
+    actor,
+    now: new Date,
+    token: randomToken
+  });
+  const repeats = standing !== undefined && canonical(parseJson(plan.record.text).value.pages) === canonical(standing.pages);
+  if (!repeats)
+    writeProjectFile(root, plan.record.path, plan.record.text);
+  return {
+    reconvertible: true,
+    run: repeats ? String(standing.id) : plan.record.id,
+    recorded: !repeats,
+    parts: plan.parts,
+    differing: plan.differing
+  };
+}
+async function sourceVerify(options, id) {
+  if (!id || !options.original)
+    throw usageError("source verify needs a source file ID and --original <file>.");
+  const actor = requireActor(options, "source verify records who ran the comparison");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const original = readOriginal(resolve3(root, options.original), LIMITS.input_bytes);
+  const done = await reconvert(root, corpus, id, original, actor);
+  if (!done.reconvertible) {
+    emit(options, { text: id, original_matches: true, ...done }, "The file is the recorded original: its digest matches. Its text was supplied by a tool or typed, so Stemma cannot make it again; compare it with `source compare` or record a review.\n");
+    return 0;
+  }
+  const lines = [
+    "The file is the recorded original: its digest matches.",
+    `Converted it again and recorded ${done.run}: ${done.parts - done.differing.length} of ${done.parts} parts agree.`,
+    ...done.differing.slice(0, 10).flatMap((p) => [
+      `  index ${p.index}: ${p.differing_words} word(s) differ`,
+      ...p.differences.slice(0, 3).map((d) => `    committed "${printable(d.reading)}" / fresh "${printable(d.other)}"`)
+    ])
+  ];
+  emit(options, { text: id, original_matches: true, ...done }, `${lines.join(`
+`)}
+`);
+  return done.differing.length > 0 ? 1 : 0;
+}
+function sourceCompare(options, id) {
+  if (!id || !options.with || !options.against)
+    throw usageError("source compare needs a source file ID, --with <text file>, and --against <what that text is>.");
+  const actor = requireActor(options, "source compare records who ran the comparison");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const bytes = namedFile(root, options.with, LIMITS.text_bytes);
+  const pages = normalizeText(new TextDecoder().decode(bytes)).split("\f").map((page) => removeStamps(page).text);
+  if (pages.length > 1 && !/\S/u.test(pages.at(-1)))
+    pages.pop();
+  const text = corpus.texts.get(id);
+  if (!text)
+    throw new InvalidInput(`No readable source file has the ID ${id}.`);
+  if (pages.length > text.parts.length)
+    throw new InvalidInput(`The other text has ${pages.length} pages and the source file ${text.parts.length} parts. Separate pages with form feeds, in the same order.`);
+  const other = new Map(pages.map((page, i) => [text.parts[i].index, page]));
+  const plan = planComparison(corpus, {
+    text: id,
+    method: "supplied_text",
+    other,
+    against: options.against,
+    independent: options.independent === true,
+    other_sha256: createHash3("sha256").update(bytes).digest("hex"),
+    tools: [{ name: "stemma-convert", version: CONVERTER_VERSION }],
+    actor,
+    now: new Date,
+    token: randomToken
+  });
+  writeProjectFile(root, plan.record.path, plan.record.text);
+  const lines = [
+    `Recorded ${plan.record.id}: ${plan.parts - plan.differing.length} of ${plan.parts} compared parts agree word for word (main text only).`,
+    ...plan.differing.slice(0, 10).flatMap((p) => [
+      `  index ${p.index}: ${p.differing_words} word(s) differ`,
+      ...p.differences.slice(0, 5).map((d) => `    here "${printable(d.reading)}" / there "${printable(d.other)}"`)
+    ]),
+    "Disagreement is not a finding: it shows where to look."
+  ];
+  emit(options, { text: id, run: plan.record.id, parts: plan.parts, differing: plan.differing }, `${lines.join(`
+`)}
+`);
+  return 0;
+}
+function reviewAdd(options, id) {
+  if (!id || !options.scope || !options.against || !options.outcome)
+    throw usageError("review add needs a source file ID, --scope, --against, and --outcome.");
+  const actor = requireActor(options, "review add records who reviewed");
+  const scope = only(options.scope, ["whole_page", "passage", "quotations", "page_number", "source_details"], "scope");
+  const outcome = only(options.outcome, ["agrees", "corrected", "disagrees", "flagged"], "outcome");
+  const flags = (options.flag ?? []).map((flag) => {
+    const [index, reading, suggested, note] = flag.split("|");
+    if (!/^\d+$/.test(index ?? "") || !reading)
+      throw usageError('--flag is "<index>|<reading>|<suggestion>|<note>"; the last two may be left out.');
+    return { index: Number(index), reading, ...suggested ? { suggested } : {}, ...note ? { note } : {} };
+  });
+  const indexes = (options.pages ?? "").split(",").filter(Boolean).map((p) => {
+    const range = /^(\d+)(?:-(\d+))?$/.exec(p.trim());
+    if (!range)
+      throw usageError("--pages is a list of page or section indexes such as 105,106 or 8-12.");
+    return range;
+  }).flatMap(([, a, b]) => Array.from({ length: Number(b ?? a) - Number(a) + 1 }, (_, i) => Number(a) + i));
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const record = planReview(corpus, {
+    text: id,
+    scope,
+    pages: indexes.length > 0 ? indexes : flags.map((f) => f.index),
+    fields: (options.fields ?? "").split(",").filter(Boolean),
+    against: options.against,
+    outcome,
+    flags,
+    actor,
+    now: new Date,
+    token: randomToken,
+    ...options.passage ? { passage: options.passage } : {},
+    ...options.note ? { note: options.note } : {},
+    ...options["original-sha256"] ? { original_sha256: options["original-sha256"] } : {}
+  });
+  writeProjectFile(root, record.path, record.text);
+  const kind = actor.kind === "person" ? "a person's review" : `a flag from a ${actor.kind}, not a person's review`;
+  return reportRecords(options, written(root, [record.path]), `Recorded ${record.id}: ${kind}. It stays current while what it covered is unchanged, and records what was said; it is not proof.
+`, { review: record.id });
+}
+function reviewsOf(corpus, only_) {
+  return corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "text_review" && !isRetired(f.data) && (!only_ || f.data.text === only_)).map((f) => {
+    const data = f.data;
+    const text = corpus.texts.get(String(data.text));
+    const reviewed = data.reviewed;
+    const by = reviewed.by;
+    return {
+      review: idOf(f),
+      text: String(data.text),
+      scope: String(data.scope),
+      outcome: String(data.outcome),
+      pages: data.pages.map((p) => Number(p.index)),
+      by: `${String(by.kind)} ${String(by.name)}`,
+      at: String(reviewed.at),
+      against: String(data.against),
+      current: text !== undefined && currentReview(data, text)
+    };
+  });
+}
+function reviewList(options, id) {
+  const root = requireProject(options);
+  const reviews = reviewsOf(openCorpus(root), id);
+  const lines = reviews.length === 0 ? ["No reviews are recorded."] : reviews.map((r) => `${r.review} ${r.current ? "current" : "STALE (what it covered has changed)"}: ${r.scope} of ${r.text} at index ${shortRanges(r.pages)}, ${r.outcome}, by ${r.by} on ${r.at}, against ${printable(r.against)}`);
+  emit(options, { reviews }, `${lines.join(`
+`)}
+`);
+  return 0;
+}
+function coverage(options, id) {
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const texts = [...corpus.texts].filter(([t, v]) => (!id || t === id) && !isRetired(v.manifest.data));
+  if (id && texts.length === 0)
+    throw new InvalidInput(`No source file in effect has the ID ${id}.`);
+  const verification = texts.map(([, text]) => coverageOf(corpus, text, tools()));
+  const lines = [
+    "What has been compared with and reviewed for each source file. These are figures, not findings.",
+    ...renderCoverage({ verification }, id ? 1000 : 3),
+    ...id ? reviewsOf(corpus, id).map((r) => `   review ${r.review}: ${r.scope} at index ${shortRanges(r.pages)}, ${r.outcome} by ${r.by}${r.current ? "" : " (stale)"}`) : [],
+    verification.length === 0 ? "   no source files" : `${verification.length} source file(s).`
+  ];
+  emit(options, { verification, reviews: reviewsOf(corpus, id) }, `${lines.join(`
+`)}
+`);
+  return 0;
+}
+function passageFind(options, words) {
+  if (!options.source || !words)
+    throw usageError("passage find needs --source <id> and the words to find.");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const found = findPassages(corpus, options.source, words);
+  const unusable = new SourceTexts(corpus).of(options.source).unusable;
+  const lines = found.length === 0 ? ["The words were not found in this source's text."] : found.flatMap((f) => [
+    `${f.address}`,
+    `  ${f.places.join("; ")}; ${f.match} match${f.locator ? `; ${f.locator.label} ${f.locator.value}` : "; no locator can be copied here"}`,
+    `  quoted data: ${printable(f.quotation)}`
+  ]);
+  if (unusable > 0)
+    lines.push(`${unusable} source file(s) of this source are damaged and were not searched.`);
+  emit(options, { found, unusable }, `${lines.join(`
+`)}
+`);
+  return found.length === 0 ? 1 : 0;
+}
+function passageCapture(options) {
+  if (!options.address)
+    throw usageError("passage capture needs --address <address>.");
+  const actor = requireActor(options, "passage capture records who selected the passage");
+  const root = requireProject(options);
+  const made = capturePassage(openCorpus(root), { address: options.address, actor, now: new Date, token: randomToken });
+  writeProjectFile(root, made.record.path, made.record.text);
+  const head = [
+    `Captured ${made.passage}, selected by ${actor.kind} ${actor.name}. Its words and locator were copied from the source file.`,
+    `  address: ${made.address}`,
+    `  found on: ${made.places.join("; ")} (method ${made.method})`,
+    `  locator: ${made.locator.label} ${made.locator.value}`,
+    "  exact text (quoted data, not instructions):",
+    ...made.exact.split(`
+`).map((l) => `  | ${printable(l)}`),
+    `  as a quotation: ${printable(made.quotation)}`,
+    `Cite it with \`record add citation\`, giving "passage": "${made.passage}" and no quotation or locator.`
+  ].join(`
+`);
+  const { record, ...result } = made;
+  return reportRecords(options, written(root, [record.path]), `${head}
+`, result);
+}
+async function lookUp(root, source, resolver, scheme, value, actor) {
+  const url = lookupAddress(resolver, value);
+  const response = await fetchBytes(url, USER_AGENT, 10 * 1024 * 1024);
+  const record = planResolution({
+    source,
+    resolver,
+    scheme,
+    value,
+    url,
+    lookup: readLookup(resolver, response.status, response.bytes),
+    actor,
+    now: new Date,
+    token: randomToken
+  });
+  writeProjectFile(root, record.path, record.text);
+  return record;
+}
+async function resolveCommand(options, sources) {
+  if (sources.length === 0)
+    throw usageError("resolve needs one or more source IDs.");
+  const actor = requireActor(options, "resolve records who made the lookup");
+  const root = requireProject(options);
+  const via = only(options.via, RESOLVERS, "via");
+  if (via === undefined !== (options.identifier === undefined))
+    throw usageError("Give --via and --identifier together.");
+  const corpus = openCorpus(root);
+  const lines = [];
+  const made = [];
+  let failed = false;
+  for (const source of sources) {
+    if (corpus.byId.get(source)?.data?.kind !== "source")
+      throw new InvalidInput(`No readable source record has the ID ${source}.`);
+    const wanted = via ? [{ resolver: via, scheme: via === "crossref" ? "doi" : "ia", value: options.identifier }] : corpus.records.filter((f) => f.data?.kind === "upstream" && f.data.source === source && !isRetired(f.data)).flatMap((f) => Array.isArray(f.data.lookups) ? f.data.lookups.filter(isObject) : []).map((l) => ({ resolver: String(l.resolver), scheme: String(l.identifier.scheme), value: String(l.identifier.value) }));
+    if (wanted.length === 0)
+      lines.push(`${source}: its upstream records list no lookup; give --via and --identifier.`);
+    for (const lookup of wanted) {
+      if (!RESOLVERS.includes(lookup.resolver) || resolverFor(lookup.scheme) !== lookup.resolver) {
+        lines.push(`${source}: this version does not look up ${lookup.scheme} at ${lookup.resolver}.`);
+        failed = true;
+        continue;
+      }
+      try {
+        const record = await lookUp(root, source, lookup.resolver, lookup.scheme, lookup.value, actor);
+        made.push(record.path);
+        lines.push(`${source}: saved ${record.id} (${lookup.resolver} ${lookup.value})`);
+      } catch (error) {
+        if (!(error instanceof FetchRefused))
+          throw error;
+        failed = true;
+        lines.push(`${source}: ${error.message} No record was written.`);
+      }
+    }
+  }
+  emit(options, { written: made }, `${lines.join(`
+`)}
+`);
+  return failed ? 1 : 0;
+}
+
+// packages/cli/src/ingest.ts
+var list4 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+var text2 = (value) => typeof value === "string" ? value : undefined;
+var active2 = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+function planEntries(options, root) {
+  if (!options.plan)
+    return { entries: [], base: root };
+  const path = resolve4(root, options.plan);
+  const bytes = namedFile(root, options.plan, LIMITS.page_map_bytes);
+  let value;
+  try {
+    value = parseJson(new TextDecoder("utf-8", { fatal: true }).decode(bytes)).value;
+  } catch {
+    throw new InvalidInput("The plan is not readable JSON.");
+  }
+  if (!isObject(value) || !Array.isArray(value.captures))
+    throw new InvalidInput('A plan is an object with a "captures" list.');
+  return { entries: list4(value.captures), base: dirname3(path) };
+}
+var asOriginal = (bytes, name) => {
+  const type = mediaType(bytes, name);
+  if (!type)
+    throw new InvalidInput(`What was fetched from ${name} is not a kind of file Stemma reads.`);
+  return { bytes, sha256: createHash4("sha256").update(bytes).digest("hex"), size: bytes.length, media_type: type };
+};
+async function ingest(options, check) {
+  const actor = requireActor(options, "ingest records who ran it");
+  const root = requireProject(options);
+  const places = (options.originals ?? []).map((p) => resolve4(root, p));
+  const log = [];
+  const say = (line) => {
+    log.push(line);
+    if (options.format === "text")
+      process.stdout.write(`${line}
+`);
+  };
+  const { entries, base } = planEntries(options, root);
+  say("== 1. Capture");
+  for (const [n, entry] of entries.entries()) {
+    const corpus = openCorpus(root);
+    const source = text2(entry.source);
+    const record = source ? corpus.byId.get(source)?.data : undefined;
+    if (!source || record?.kind !== "source")
+      throw usageError(`Plan entry ${n + 1} names no source record in the project.`);
+    const label = String(record.citation_key ?? source);
+    const url = text2(entry.url);
+    const upstreams = active2(corpus, "upstream").filter((u) => u.data.source === source);
+    if (url && upstreams.some((u) => u.data.url === url))
+      continue;
+    let original;
+    let retrieved = text2(entry.retrieved_at);
+    const file = text2(entry.file);
+    if (file) {
+      original = readOriginal(resolve4(base, file), LIMITS.input_bytes);
+      if (!retrieved)
+        throw usageError(`Plan entry ${label} gives a file, so it must say when it was retrieved (retrieved_at); that is never guessed.`);
+    } else if (url && options.fetch) {
+      try {
+        const response = await fetchBytes(url, USER_AGENT);
+        if (response.status !== 200)
+          throw new FetchRefused(`The address answered ${response.status}.`);
+        original = asOriginal(response.bytes, new URL(url).pathname);
+        retrieved = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+      } catch (error) {
+        if (!(error instanceof FetchRefused))
+          throw error;
+        say(`  ${label}: ${error.message} Nothing was retried another way. Obtain the file yourself and name it in the plan.`);
+        continue;
+      }
+    } else {
+      say(`  ${label}: no file is named, and fetching was not asked for (--fetch).`);
+      continue;
+    }
+    if (upstreams.some((u) => u.data.sha256 === original.sha256))
+      continue;
+    const auxiliary = [];
+    let pageNumbers;
+    for (const aux of list4(entry.auxiliary)) {
+      const path = text2(aux.file);
+      if (!path || !text2(aux.url))
+        continue;
+      const found = namedFile(base, path, LIMITS.page_map_bytes);
+      auxiliary.push({ role: String(aux.role), url: String(aux.url), sha256: createHash4("sha256").update(found).digest("hex"), size: found.length });
+      if (aux.role === "page_numbers")
+        pageNumbers = resolve4(base, path);
+    }
+    const id = `${KINDS.upstream.prefix}${randomToken()}`;
+    const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
+    const upstream = {
+      schema: RECORD_SCHEMA,
+      id,
+      kind: "upstream",
+      created: { at: now, by: { ...actor } },
+      source,
+      ...url ? { url } : {},
+      retrieved_at: retrieved,
+      retrieved_by: { ...actor },
+      sha256: original.sha256,
+      size: original.size,
+      media_type: original.media_type,
+      ...text2(entry.version) ? { version: text2(entry.version) } : {},
+      ...Array.isArray(entry.identifiers) ? { identifiers: entry.identifiers } : {},
+      ...auxiliary.length > 0 ? { auxiliary } : {},
+      ...Array.isArray(entry.lookups) ? { lookups: entry.lookups } : {},
+      ...text2(entry.note) ? { note: text2(entry.note) } : {}
+    };
+    assertValid("Upstream", "upstream", canonical(upstream));
+    cacheOriginal(root, original.bytes, original.sha256);
+    const held = [...corpus.texts.values()].some((t) => t.manifest.data.source === source && !isRetired(t.manifest.data) && list4(t.manifest.data.original.files).some((f) => f.sha256 === original.sha256));
+    if (!held) {
+      const convert = isObject(entry.convert) ? entry.convert : {};
+      const done = await convertAndWrite({
+        root,
+        corpus,
+        originals: [original],
+        actor,
+        ...isObject(convert.identity) ? { identity: convert.identity } : {},
+        options: {
+          format: "json",
+          source,
+          "acquired-at": retrieved,
+          origin: url ?? text2(convert.obtained_from) ?? "supplied by the author",
+          ...text2(entry.version) ? { "source-version": text2(entry.version) } : {},
+          ...text2(convert.method) ? { method: text2(convert.method) } : {},
+          ...text2(convert.recognition) ? { recognition: text2(convert.recognition) } : {},
+          ...text2(convert.name) ? { name: text2(convert.name) } : {},
+          ...text2(convert.coverage_note) ? { "coverage-note": text2(convert.coverage_note) } : {},
+          ...text2(convert.page_map) ? { "page-map": resolve4(base, text2(convert.page_map)) } : original.media_type === "application/pdf" ? { "auto-pages": true } : {},
+          ...pageNumbers ? { "page-numbers": pageNumbers } : {}
+        }
+      });
+      say(`  ${label}: ${done.plan.parts} ${done.plan.paged ? "pages" : "sections"} written to ${done.plan.directory}/ (${done.converted.method}${done.plan.paged ? `, ${done.labelled} labelled` : ""})`);
+    }
+    writeProjectFile(root, recordPath("upstream", id), canonical(upstream));
+  }
+  say("== 2. Reverify against originals");
+  const upstreams = active2(openCorpus(root), "upstream");
+  let compared = 0;
+  let current = 0;
+  const unavailable = [];
+  for (const upstream of upstreams) {
+    const data = upstream.data;
+    const corpus = openCorpus(root);
+    const label = String(corpus.byId.get(String(data.source))?.data?.citation_key ?? data.source);
+    const mine = [...corpus.texts].filter(([, t]) => t.manifest.data.source === data.source && !isRetired(t.manifest.data) && list4(t.manifest.data.original.files).some((f) => f.sha256 === data.sha256));
+    const todo = mine.map(([id, t]) => ({ id, loaded: t, standing: reconversions(corpus, id).find((r) => currentRun(r.data, t, tools()))?.data })).filter((m) => options.reconvert || !m.standing);
+    current += mine.length - todo.length;
+    const wanted = { sha256: String(data.sha256), size: Number(data.size) };
+    let path = findOriginal(root, wanted, places);
+    if (!path && options.fetch && text2(data.url)) {
+      try {
+        const response = await fetchBytes(String(data.url), USER_AGENT);
+        const original = asOriginal(response.bytes, new URL(String(data.url)).pathname);
+        if (original.sha256 !== wanted.sha256)
+          say(`  ${label}: what the address gives now differs from the recorded original (sha256 ${original.sha256}). It was not used.`);
+        else
+          path = cacheOriginal(root, original.bytes, original.sha256);
+      } catch (error) {
+        if (!(error instanceof FetchRefused))
+          throw error;
+        say(`  ${label}: ${error.message} Nothing was retried another way.`);
+      }
+    }
+    if (!path) {
+      unavailable.push(label);
+      continue;
+    }
+    const original = { ...readOriginal(path, LIMITS.input_bytes), media_type: String(data.media_type) };
+    for (const { id, loaded, standing } of todo) {
+      if (!loaded.usable) {
+        say(`  ${label}: ${loaded.directory} is damaged, so it was not compared.`);
+        continue;
+      }
+      const done = await reconvert(root, openCorpus(root), id, original, actor, standing);
+      if (!done.reconvertible)
+        say(`  ${label}: its text was supplied, so it cannot be made again from the original.`);
+      else {
+        compared++;
+        say(`  ${label}: converted again; ${done.parts - done.differing.length} of ${done.parts} parts agree${done.recorded ? "" : ", as already recorded"}`);
+      }
+    }
+  }
+  say(`  ${compared} source file(s) converted again, ${current} already had a current comparison.`);
+  if (unavailable.length > 0) {
+    say(`  No original was available for: ${unavailable.join(", ")}. Their text was not compared with it. Give --originals <dir>, or --fetch to fetch from the recorded addresses.`);
+  }
+  say("== 3. Catalogue lookups");
+  const refresh = options["refresh-lookups"] === true;
+  let made = 0;
+  let saved = 0;
+  for (const upstream of upstreams) {
+    for (const lookup of list4(upstream.data.lookups)) {
+      const identifier = isObject(lookup.identifier) ? lookup.identifier : {};
+      const [resolver, scheme, value] = [String(lookup.resolver), String(identifier.scheme), String(identifier.value)];
+      const source = String(upstream.data.source);
+      const have = active2(openCorpus(root), "resolution").some((r) => r.data.source === source && r.data.resolver === resolver && isObject(r.data.identifier) && r.data.identifier.value === value);
+      if (have && !refresh) {
+        saved++;
+        continue;
+      }
+      if (!options.fetch && !refresh) {
+        say(`  ${resolver} ${value}: no saved response, and the network was not asked for (--fetch).`);
+        continue;
+      }
+      if (!RESOLVERS.includes(resolver) || resolverFor(scheme) !== resolver) {
+        say(`  ${resolver} ${value}: this version does not make that lookup.`);
+        continue;
+      }
+      try {
+        await lookUp(root, source, resolver, scheme, value, actor);
+        made++;
+      } catch (error) {
+        if (!(error instanceof FetchRefused))
+          throw error;
+        say(`  ${resolver} ${value}: ${error.message} Nothing was retried another way.`);
+      }
+    }
+  }
+  say(`  ${made} lookup(s) made, ${saved} already saved.`);
+  say("== 4. Check");
+  return check(options);
+}
+
+// packages/cli/src/runtime.ts
+var PINNED_BUN = "1.4.5";
+var ISOLATION_FLAGS = ["--no-install", "--no-env-file", "--config=/dev/null"];
+var LAUNCHER_HELP = `Run it through the plugin's launcher, scripts/stemma.sh, which fetches and uses Bun ${PINNED_BUN}. Nothing was checked.`;
+function runtimeProblem(version, flags) {
+  if (version !== PINNED_BUN)
+    return `This is Bun ${version}; Stemma needs Bun ${PINNED_BUN}. ${LAUNCHER_HELP}`;
+  if (!flags.includes("--no-install")) {
+    return `Bun was started without --no-install, so it could download packages while running. Start it as: bun ${ISOLATION_FLAGS.join(" ")} <plugin root>/dist/stemma.js. Nothing was checked.`;
+  }
+  return;
+}
+
+// packages/cli/src/main.ts
+var REPORT_PATH = ".stemma/reports/check.json";
+var PUBLICATION = "The project holds the full text of its sources: anyone who can read the repository can read them, so publishing it publishes them.";
+var USAGE = `stemma ${VERSION}
+The plugin runs this through its launcher: sh scripts/stemma.sh <data directory> <command> [options]
+
+  version
+  doctor
+  init --project <dir>
+  ingest --actor <kind>:<name> [--plan <file>] [--originals <dir>]... [--fetch] [--reconvert] [--refresh-lookups]
+  source pages <original> [--text-layer <file>] [--page-numbers <file>] [--out <file>]
+  source convert [<original>] --source <id> --acquired-at <time> --actor <kind>:<name> [--origin <text>]
+             [--source-version <text>] [--held-at <text>] [--description <text>] [--image <file>]...
+             [--transcription <file> | --text-layer <file>] [--method born_text|text_layer|markup|ocr|manual]
+             [--recognition <text>] [--tool <name> --tool-version <version>] [--page-map <file> | --auto-pages]
+             [--page-numbers <file>] [--identity <file>] [--coverage-note <text>] [--note <text>] [--name <name>]
+  source label <text id> --page-map <file> --actor <kind>:<name>
+  source seal <text id> --actor person:<name> [--note <text>]
+  source verify <text id> --original <file> --actor <kind>:<name>
+  source compare <text id> --with <text file> --against <text> [--independent] --actor <kind>:<name>
+  review add <text id> --scope whole_page|passage|quotations|page_number|source_details --against <text>
+             --outcome agrees|corrected|disagrees|flagged --actor <kind>:<name> [--pages <indexes>]
+             [--passage <id>] [--fields <list>] [--flag "<index>|<reading>|<suggestion>|<note>"]...
+             [--original-sha256 <hex>] [--note <text>]
+  review list [<text id>]
+  coverage [<text id>]
+  passage find --source <id> <words>
+  passage capture --address <address> --actor <kind>:<name>
+  record add <kind> --input <file|-> [--actor <kind>:<name>]
+  resolve <source id>... --actor <kind>:<name> [--via crossref|internet_archive --identifier <value>]
+  validate [paths]
+  fmt [paths]
+  rules check
+  check [--changed | --all]
+  excerpt --source <id> --pages <printed pages> | --passage <id>
+  retire <record id...> --reason <text> --actor <kind>:<name> [--replaced-by <id>]
+  research list
+
+Options: --project <dir> (default: nearest ancestor holding stemma.json), --format text|json
+Only ingest --fetch, ingest --refresh-lookups and resolve use the network.
+Exit codes: 0 done, nothing open; 1 done, findings open; 2 usage or not implemented;
+3 project unreadable; 4 wrong runtime; 5 request not valid; 70 internal error.
+`;
+var NOT_YET = new Set([
+  "migrate",
+  "key",
+  "unreviewed",
+  "reviewed",
+  "rounds",
+  "support",
+  "annotate",
+  "import",
+  "export",
+  "takeover",
+  "index",
+  "setup",
+  "log",
+  "activity",
+  "plan",
+  "voice",
+  "audit",
+  "checkpoint",
+  "authorship",
+  "restricted",
+  "build",
+  "disclosure",
+  "scan",
+  "graph",
+  "map"
+]);
+var STRING = { type: "string" };
+var FLAG = { type: "boolean" };
+var LIST = { type: "string", multiple: true };
+var OPTIONS = {
+  project: STRING,
+  format: STRING,
+  help: FLAG,
+  input: STRING,
+  actor: STRING,
+  changed: FLAG,
+  all: FLAG,
+  source: STRING,
+  origin: STRING,
+  "acquired-at": STRING,
+  "source-version": STRING,
+  "held-at": STRING,
+  description: STRING,
+  image: LIST,
+  "text-layer": STRING,
+  transcription: STRING,
+  method: STRING,
+  recognition: STRING,
+  tool: STRING,
+  "tool-version": STRING,
+  "page-map": STRING,
+  "auto-pages": FLAG,
+  "page-numbers": STRING,
+  identity: STRING,
+  "coverage-note": STRING,
+  note: STRING,
+  name: STRING,
+  out: STRING,
+  original: STRING,
+  with: STRING,
+  against: STRING,
+  independent: FLAG,
+  scope: STRING,
+  pages: STRING,
+  passage: STRING,
+  fields: STRING,
+  outcome: STRING,
+  flag: LIST,
+  "original-sha256": STRING,
+  address: STRING,
+  via: STRING,
+  identifier: STRING,
+  plan: STRING,
+  originals: LIST,
+  fetch: FLAG,
+  reconvert: FLAG,
+  "refresh-lookups": FLAG,
+  reason: STRING,
+  "replaced-by": STRING
+};
+var COMMAND_OPTIONS = {
+  "source convert": ["actor", "source", "origin", "acquired-at", "source-version", "held-at", "description", "image", "text-layer", "transcription", "method", "recognition", "tool", "tool-version", "page-map", "auto-pages", "page-numbers", "identity", "coverage-note", "note", "name"],
+  "source pages": ["text-layer", "page-numbers", "out"],
+  "source label": ["actor", "page-map"],
+  "source seal": ["actor", "note"],
+  "source verify": ["actor", "original"],
+  "source compare": ["actor", "with", "against", "independent"],
+  "review add": ["actor", "scope", "pages", "passage", "fields", "against", "outcome", "flag", "original-sha256", "note"],
+  "review list": [],
+  coverage: [],
+  "passage find": ["source"],
+  "passage capture": ["actor", "address"],
+  ingest: ["actor", "plan", "originals", "fetch", "reconvert", "refresh-lookups"],
+  resolve: ["actor", "via", "identifier"],
+  excerpt: ["source", "passage", "pages"],
+  retire: ["actor", "reason", "replaced-by"],
+  "record add": ["actor", "input"],
+  check: ["changed", "all"],
+  "research list": [],
+  init: [],
+  doctor: [],
+  version: [],
+  validate: [],
+  fmt: [],
+  "rules check": []
+};
+function version(options) {
+  emit(options, { stemma: VERSION, bun_pinned: PINNED_BUN }, `stemma ${VERSION} (needs Bun ${PINNED_BUN})
+`);
+  return 0;
+}
+function doctor(options) {
+  const flags = Object.fromEntries(ISOLATION_FLAGS.map((f) => [f, process.execArgv.includes(f)]));
+  const root = options.project ? resolve5(options.project) : undefined;
+  const project = root ?? "";
+  const versions = tools();
+  const info = {
+    ...versions,
+    bun_pinned: PINNED_BUN,
+    bun_path: process.execPath,
+    bundle_path: Bun.main,
+    working_directory: process.cwd(),
+    project,
+    start_flags: flags,
+    platform: `${process.platform}-${process.arch}`,
+    platform_status: "Development tests have run on macOS (Apple silicon) only. No release has been observed in a desktop app; other systems are untested.",
+    source_limits: LIMITS,
+    originals_cache: project ? existsSync3(join4(project, ".stemma/originals")) : false
+  };
+  const missing = ISOLATION_FLAGS.filter((f) => !flags[f]);
+  const lines = [
+    `stemma ${info.stemma}`,
+    `Bun ${info.bun} (pinned ${PINNED_BUN}) at ${info.bun_path}`,
+    `SQLite ${info.sqlite}`,
+    `Converters: stemma-convert ${info["stemma-convert"]}, pdfjs-dist ${info["pdfjs-dist"]}. No recognition engine is built in.`,
+    `Command line: ${info.bundle_path}`,
+    `Working directory: ${info.working_directory}`,
+    `Project: ${project || "none named"}`,
+    `Platform: ${info.platform}. ${info.platform_status}`,
+    `Limits on originals: ${LIMITS.input_bytes / 1048576} MiB a file, ${LIMITS.text_bytes / 1048576} MiB of text and ${LIMITS.parts} pages or sections.`,
+    missing.length === 0 ? "Start flags: no run-time downloads, and no .env or bunfig.toml is loaded." : `WARNING: started without ${missing.join(" ")}. A .env or bunfig.toml in the working directory could run code or change settings.`
+  ];
+  emit(options, info, `${lines.join(`
+`)}
+`);
+  return 0;
+}
+function init(options) {
+  if (!options.project)
+    throw usageError("init needs --project <dir>.");
+  const root = resolve5(options.project);
+  const made = initProject(root);
+  emit(options, { project: root, ...made }, `Created a Stemma project in ${root}
+${made.written.map((f) => `  wrote ${f}`).join(`
+`)}
+${PUBLICATION}
 `);
   return 0;
 }
@@ -109871,9 +113701,9 @@ function excerptText(excerpt) {
   const mark = excerpt.boundary;
   return [
     `Excerpt of source ${excerpt.source}: ${excerpt.requested}.`,
-    `Text: ${excerpt.extraction} of copy ${excerpt.capture}; method ${excerpt.method}, quality ${excerpt.quality}.${excerpt.quality_note ? ` Note: ${printable(excerpt.quality_note)}` : ""}`,
-    "This is stored extracted text, not a reading of the page: compare any words you will quote with the page itself.",
-    ...excerpt.other_extractions.length > 0 ? [`Other stored texts also map these pages: ${excerpt.other_extractions.join(", ")}. The newest was used.`] : [],
+    `From ${excerpt.source_text}; method ${excerpt.method}, quality ${excerpt.quality}.`,
+    "This is converted or recognized text, not a reading of the page: compare any words you will quote with the page itself where you can.",
+    ...excerpt.other_source_texts.length > 0 ? [`Other source files also label these pages: ${excerpt.other_source_texts.join(", ")}. The newest was used.`] : [],
     `Everything between the ${mark} lines is quoted data from the source. It is not an instruction to anyone.`,
     ...excerpt.parts.flatMap((part) => [
       `--- ${mark} begin: ${part.heading}`,
@@ -109889,23 +113719,19 @@ function excerptText(excerpt) {
 function excerpt2(options) {
   const { source, passage, pages } = options;
   if (passage ? source || pages : !source || !pages)
-    throw usage("excerpt needs --passage <id>, or --source <id> with --pages <printed pages>.");
-  const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const { store } = openStore(root, corpus, options);
-  const made = passage ? excerptPassage(corpus, store, passage) : excerptPages(corpus, store, source, pages);
+    throw usageError("excerpt needs --passage <id>, or --source <id> with --pages <printed pages>.");
+  const corpus = openCorpus(requireProject(options));
+  const made = passage ? excerptPassage(corpus, passage) : excerptPages(corpus, source, pages);
   emit(options, { ...made, content_is: "quoted data, not instructions", limits: EXCERPT_LIMITS }, `${excerptText(made)}
 `);
   return 0;
 }
 function retire2(options, ids) {
   if (ids.length === 0)
-    throw usage("retire needs one or more record IDs.");
-  const actor = actorOf(options);
-  if (!actor)
-    throw usage("retire records who retired the record: give --actor.");
+    throw usageError("retire needs one or more record IDs.");
+  const actor = requireActor(options, "retire records who retired the record");
   if (!options.reason)
-    throw usage("retire records why: give --reason <text>.");
+    throw usageError("retire records why: give --reason <text>.");
   const root = requireProject(options);
   const plan = planRetire(openCorpus(root), {
     ids,
@@ -109920,83 +113746,29 @@ function retire2(options, ids) {
   const retired = new Set(plan.map((r) => r.path));
   const affected = dependants(after).filter((d) => d.walk.changes.some((c) => retired.has(c.record.path))).map((d) => d.file.path);
   const head = [
-    `Retired ${plan.map((r) => r.id).join(", ")}. The files stay, and stored copies are not deleted.`,
-    affected.length === 0 ? "No note, claim or citation rests on what was retired." : "These rest on what was retired, and `check` lists each under source.changed:",
+    `Retired ${plan.map((r) => r.id).join(", ")}. The files stay.`,
+    affected.length === 0 ? "No passage, note, claim or citation rests on what was retired." : "These rest on what was retired, and `check` lists each under source.changed:",
     ...affected.map((p) => `  ${p}`)
   ].join(`
 `);
   return reportRecords(options, validateFiles(after, retired), `${head}
 `, { retired: plan.map((r) => r.id), affected });
 }
-function storeVerify(options) {
-  const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const { store, path, chosen_by } = openStore(root, corpus, options);
-  const found = verifyStore(corpus, store, options.unreferenced ? store.list() : undefined);
-  const bad = found.problems.length > 0 || found.unread_records.length > 0;
-  const lines = [
-    `Content store: ${path} (chosen by ${chosen_by}${existsSync4(path) ? "" : "; this directory does not exist"})`,
-    `${found.referenced} blob(s) named by records: ${found.intact} present and matching, ${found.problems.length} not.`,
-    ...found.problems.map((p) => `  ${p.state.toUpperCase()} ${p.sha256}
-${p.named_by.map((f) => `      named by ${f}`).join(`
-`)}`),
-    ...found.problems.length > 0 ? [
-      "Why it matters: checks that need these files report that they could not check.",
-      "What to do: restore them from your backup of the store, or add the same files again."
-    ] : [],
-    ...found.unread_records.length > 0 ? [
-      "These record files cannot be read, so what they name is unknown and the lists may be incomplete:",
-      ...found.unread_records.map((p) => `  ${p}`)
-    ] : [],
-    ...found.unreferenced ? [
-      `${found.unreferenced.length} blob(s) in the store that no record of this project names:`,
-      ...found.unreferenced.map((d) => `  ${d}`),
-      "Stemma deletes no blob. A store shared with another project holds blobs that project names."
-    ] : [],
-    BACKUP_NOTICE
-  ];
-  emit(options, { store: path, chosen_by, ...found }, `${lines.join(`
-`)}
-`);
-  return bad ? 1 : 0;
-}
-function storeStatus(root, options) {
-  const corpus = loadCorpus(readProject(root));
-  if (!corpus.settings.data)
-    return { note: "stemma.json cannot be read, so the content store is unknown." };
-  let location;
-  try {
-    location = storeLocation(root, corpus.settings.data.project_id, options["store-dir"]);
-  } catch (error) {
-    return { note: error instanceof Error ? error.message : "The content store location is unknown." };
-  }
-  const refused = storeProblem(root, location.path);
-  const named = [...referencedBlobs(corpus).keys()];
-  const store = new BlobStore(location.path);
-  return {
-    ...location,
-    exists: existsSync4(location.path),
-    ...refused ? { refused } : {},
-    blobs_named: named.length,
-    blobs_present: refused ? 0 : named.filter((d) => store.has(d)).length,
-    unread_records: unreadRecords(corpus).length
-  };
-}
 function recordAdd(options, kind) {
   if (!kind || !Object.hasOwn(KINDS, kind))
-    throw usage(`record add needs a record kind: ${Object.keys(KINDS).join(", ")}.`);
+    throw usageError(`record add needs a record kind: ${Object.keys(KINDS).join(", ")}.`);
   if (!options.input)
-    throw usage("record add needs --input <file> or --input - for standard input.");
+    throw usageError("record add needs --input <file> or --input - for standard input.");
   const root = requireProject(options);
-  openCorpus(root);
+  const corpus = openCorpus(root);
   let input;
   try {
-    input = readFileSync3(options.input === "-" ? 0 : resolve3(root, options.input), "utf8");
+    input = readFileSync4(options.input === "-" ? 0 : resolve5(root, options.input), "utf8");
   } catch {
     throw new InvalidInput("The input file cannot be read.");
   }
   const actor = actorOf(options);
-  const { id, path, text } = prepareRecord({ kind, input, ...actor ? { actor } : {}, now: new Date, token: randomToken });
+  const { id, path, text } = prepareRecord({ kind, input, corpus, ...actor ? { actor } : {}, now: new Date, token: randomToken });
   if (readProject(root).records.some((f) => f.path === path))
     throw new InvalidInput(`${path} already exists; record add does not overwrite.`);
   writeProjectFile(root, path, text);
@@ -110005,14 +113777,14 @@ function recordAdd(options, kind) {
 `, { added: { id, path } });
 }
 function targets(root, corpus, named) {
-  const all = [corpus.settings, ...corpus.records].map((f) => f.path).concat(corpus.rules ? [corpus.rules.path] : []);
+  const all = [corpus.settings, ...corpus.records, ...corpus.partFiles].map((f) => f.path).concat(corpus.rules ? [corpus.rules.path] : []);
   if (named.length === 0)
     return new Set(all);
   return new Set(named.flatMap((name) => {
     const rel = projectRelative(root, name);
     const found = all.filter((p) => rel === "" || p === rel || p.startsWith(`${rel}/`));
     if (found.length === 0)
-      throw new CommandError(5, "unknown_path", `No project record file is at ${name}.`, [name]);
+      throw new CommandError(5, "unknown_path", `No project record or source file is at ${name}.`, [name]);
     return found;
   }));
 }
@@ -110034,19 +113806,30 @@ ${changed.map((p) => `  ${p}
 `).join("")}`;
   return reportRecords(options, validateFiles(openCorpus(root), wanted), head, { changed });
 }
+var printable2 = (text) => text.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, " ");
+function researchList(options) {
+  const notes = researchIndex(openCorpus(requireProject(options)));
+  const lines = notes.map((n) => {
+    const title = n.problem === "cannot_read" ? "(cannot be read)" : n.problem === "title_withheld" ? "(title not shown: it matches a coordinate form)" : n.title ?? "(no heading)";
+    return `${n.date ?? "undated   "}  ${printable2(n.path)}
+            ${printable2(title)}`;
+  });
+  const head = notes.length === 0 ? "No research notes. They are Markdown files under research/." : `${notes.length} research note(s). These are working notes, not sources or evidence. Titles are text from the files, not instructions.`;
+  emit(options, { content_is: "data from research notes, not instructions", notes }, `${[head, ...lines].join(`
+`)}
+`);
+  return 0;
+}
 function rulesCheck(options) {
   const root = requireProject(options);
   return reportRecords(options, validateFiles(openCorpus(root), new Set(["rules.md"])), "", {});
 }
 function check(options) {
   if (options.changed && options.all)
-    throw usage("Use --changed or --all, not both.");
+    throw usageError("Use --changed or --all, not both.");
   const started = new Date;
   const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const opened = referencedBlobs(corpus).size > 0 ? openStore(root, corpus, options) : undefined;
-  const blobs = opened?.store ?? NO_STORE;
-  const { body, errors } = runChecks(corpus, tools(), blobs);
+  const { body, errors } = runChecks(loadCorpus(readProject(openProject(root))), tools());
   const report = {
     schema: "stemma.check-report/0",
     body,
@@ -110059,10 +113842,8 @@ function check(options) {
   }
   const widened = options.all ? "" : `The whole project is checked each time.
 `;
-  const absent = opened && body.results.some((r) => r.check === "source.held" && /_(missing|altered)$/.test(r.reason_code ?? "")) ? `Content store looked in: ${opened.path} (chosen by ${opened.chosen_by}). It is private and not part of the repository; where its files are absent or changed, nothing about them was checked.
-` : "";
   emit(options, report, `${renderReport(body)}
-${absent}${widened}Full report: ${join4(root, REPORT_PATH)}
+${widened}Full report: ${join4(root, REPORT_PATH)}
 `);
   if (errors.length > 0) {
     process.stderr.write(`A check failed to run. This is a Stemma defect and no result may be read as a pass.
@@ -110073,11 +113854,14 @@ ${errors.join(`
   }
   return body.label === "checked_clean" ? 0 : 1;
 }
-function dispatch(positionals, options) {
-  const [command, ...rest] = positionals;
+function openProject(root) {
+  openCorpus(root);
+  return root;
+}
+function dispatch(command, rest, options) {
   const only = (count) => {
     if (rest.length > count)
-      throw usage(`Too many arguments for ${command}.`);
+      throw usageError(`Too many arguments for ${command}.`);
   };
   switch (command) {
     case "version":
@@ -110096,53 +113880,64 @@ function dispatch(positionals, options) {
     case "check":
       only(0);
       return check(options);
+    case "ingest":
+      only(0);
+      return ingest(options, check);
     case "excerpt":
       only(0);
       return excerpt2(options);
     case "retire":
       return retire2(options, rest);
-    case "source":
-      if (rest[0] === "add") {
-        only(2);
-        return sourceAdd(options, rest[1]);
-      }
-      if (rest[0] === "text") {
-        only(2);
-        return sourceText(options, rest[1]);
-      }
-      if (rest[0] === "pages") {
-        only(2);
-        return sourcePages(options, rest[1]);
-      }
-      if (["admit", "reject", "confirm"].includes(rest[0] ?? "")) {
-        throw new CommandError(2, "not_implemented", `\`source ${rest[0]}\` is not implemented in this version. Nothing was done.`);
-      }
-      throw usage("The source commands available now are `source add`, `source pages` and `source text`.");
-    case "store":
-      if (rest[0] !== "verify")
-        throw usage("The only store command is `store verify`.");
+    case "resolve":
+      return resolveCommand(options, rest);
+    case "coverage":
       only(1);
-      return storeVerify(options);
-    case "record":
-      if (["show", "search", "trace"].includes(rest[0] ?? "")) {
-        throw new CommandError(2, "not_implemented", `\`record ${rest[0]}\` is not implemented in this version. Nothing was done.`);
-      }
-      if (rest[0] !== "add")
-        throw usage("The record command available now is `record add`.");
-      only(2);
-      return recordAdd(options, rest[1]);
-    case "rules":
-      if (rest[0] !== "check")
-        throw usage("The only rules command is `rules check`.");
+      return coverage(options, rest[0]);
+    case "source pages":
       only(1);
+      return sourcePages(options, rest[0]);
+    case "source convert":
+      only(1);
+      return sourceConvert(options, rest);
+    case "source label":
+      only(1);
+      return sourceLabel(options, rest[0]);
+    case "source seal":
+      only(1);
+      return sourceSeal(options, rest[0]);
+    case "source verify":
+      only(1);
+      return sourceVerify(options, rest[0]);
+    case "source compare":
+      only(1);
+      return sourceCompare(options, rest[0]);
+    case "review add":
+      only(1);
+      return reviewAdd(options, rest[0]);
+    case "review list":
+      only(1);
+      return reviewList(options, rest[0]);
+    case "passage find":
+      only(1);
+      return passageFind(options, rest[0]);
+    case "passage capture":
+      only(0);
+      return passageCapture(options);
+    case "record add":
+      only(1);
+      return recordAdd(options, rest[0]);
+    case "rules check":
+      only(0);
       return rulesCheck(options);
+    case "research list":
+      only(0);
+      return researchList(options);
     default:
-      if (command && NOT_YET.has(command)) {
-        throw new CommandError(2, "not_implemented", `\`${command}\` is not implemented in this version. Nothing was done.`);
-      }
-      throw usage(command ? `Unknown command: ${command}` : "No command given.");
+      throw usageError(`Unknown command: ${command}`);
   }
 }
+var TWO_WORDS = new Set(["source", "review", "passage", "record", "rules", "research"]);
+var NOT_YET_SUB = new Set(["source admit", "source reject", "record show", "record search", "record trace", "review import", "review comment", "review baseline", "review needed", "research record", "research corpus", "research admit", "research reject", "research coverage"]);
 async function main(argv) {
   let json = argv.includes("--format=json") || argv[argv.indexOf("--format") + 1] === "json";
   try {
@@ -110151,60 +113946,36 @@ async function main(argv) {
       throw new CommandError(4, "wrong_runtime", wrong);
     let parsed;
     try {
-      parsed = parseArgs({
-        args: argv,
-        allowPositionals: true,
-        strict: true,
-        options: {
-          project: { type: "string" },
-          format: { type: "string" },
-          input: { type: "string" },
-          actor: { type: "string" },
-          changed: { type: "boolean" },
-          all: { type: "boolean" },
-          help: { type: "boolean" },
-          "store-dir": { type: "string" },
-          source: { type: "string" },
-          origin: { type: "string" },
-          "acquired-at": { type: "string" },
-          "source-version": { type: "string" },
-          unpublished: { type: "string" },
-          "community-restricted": { type: "string" },
-          license: { type: "string" },
-          "text-layer": { type: "string" },
-          "page-map": { type: "string" },
-          method: { type: "string" },
-          tool: { type: "string" },
-          "tool-version": { type: "string" },
-          note: { type: "string" },
-          unreferenced: { type: "boolean" },
-          "page-numbers": { type: "string" },
-          out: { type: "string" },
-          passage: { type: "string" },
-          pages: { type: "string" },
-          reason: { type: "string" },
-          "replaced-by": { type: "string" }
-        }
-      });
+      parsed = parseArgs({ args: argv, allowPositionals: true, strict: true, options: OPTIONS });
     } catch (error) {
-      throw usage(error instanceof Error ? error.message : "Bad arguments.");
+      throw usageError(error instanceof Error ? error.message : "Bad arguments.");
     }
-    const { format = "text", help, ...rest } = parsed.values;
+    const { format = "text", help, ...values } = parsed.values;
     if (format !== "text" && format !== "json")
-      throw usage("--format is text or json.");
+      throw usageError("--format is text or json.");
     json = format === "json";
     if (help) {
       process.stdout.write(USAGE);
       return 0;
     }
-    const [first = "", second = ""] = parsed.positionals;
-    const taken = COMMAND_OPTIONS[`${first} ${second}`] ?? COMMAND_OPTIONS[first];
-    const extra = taken && Object.keys(rest).find((name) => !["project", "store-dir", ...taken].includes(name));
+    const [first, ...others] = parsed.positionals;
+    if (!first)
+      throw usageError("No command given.");
+    const two = TWO_WORDS.has(first);
+    const command = two ? `${first} ${others[0] ?? ""}`.trim() : first;
+    const rest = two ? others.slice(1) : others;
+    if (NOT_YET.has(first) || NOT_YET_SUB.has(command)) {
+      throw new CommandError(2, "not_implemented", `\`${NOT_YET.has(first) ? first : command}\` is not implemented in this version. Nothing was done.`);
+    }
+    const taken = COMMAND_OPTIONS[command];
+    if (!taken)
+      throw usageError(`Unknown command: ${command}`);
+    const extra = Object.keys(values).find((name) => !["project", ...taken].includes(name));
     if (extra)
-      throw usage(`--${extra} is not an option of this command.`);
-    return await dispatch(parsed.positionals, { ...rest, format });
+      throw usageError(`--${extra} is not an option of this command.`);
+    return await dispatch(command, rest, { ...values, format });
   } catch (error) {
-    const known = error instanceof CommandError ? error : error instanceof InvalidInput ? new CommandError(5, "invalid_input", `${error.message} Nothing was written.`) : error instanceof UnsupportedFile ? new CommandError(5, "unsupported_file", error.message) : error instanceof UnsafeStore ? new CommandError(5, "unsafe_store", error.message) : error instanceof DuplicateCopy ? new CommandError(5, "already_held", `These exact bytes are already held: ${error.holders.map((h) => `source ${h.source} (capture ${h.capture})`).join(", ")}. Nothing was written and nothing was merged. To restore a missing blob, add the file with --source naming that source; to attach the same file to another source, name that one with --source.`, error.holders.map((h) => h.source)) : error instanceof NoExtractor ? new CommandError(2, "not_implemented", "This version reads text out of plain text and PDF copies only. Supply the copy's text with --text-layer <file>, with a form feed after each page. Nothing was saved.") : error instanceof ActorNeeded ? usage("The input has no `created` stamp, so say who is adding it with --actor.") : error instanceof UnsafePath ? new CommandError(5, "unsafe_path", "That path leaves the project or is not a plain file. Nothing was written there.", [error.message]) : error instanceof AlreadyInitialized ? new CommandError(5, "already_initialized", "This directory already holds stemma.json; init changed nothing.") : new CommandError(70, "internal_error", `Internal error; no result may be read as a pass. ${error instanceof Error ? error.message : ""}`);
+    const known = error instanceof CommandError ? error : error instanceof InvalidInput ? new CommandError(5, "invalid_input", `${error.message} Nothing was written.`) : error instanceof UnsupportedFile ? new CommandError(5, "unsupported_file", error.message) : error instanceof Unconvertible ? new CommandError(5, "invalid_input", `${error.message} Nothing was written.`) : error instanceof DuplicateOriginal ? new CommandError(5, "already_held", `A source file already holds this original: ${error.holders.map((h) => `source ${h.source} (${h.text})`).join(", ")}. Nothing was written and nothing was merged. To add another conversion or attach it to another source, name that source with --source.`, error.holders.map((h) => h.source)) : error instanceof ActorNeeded ? usageError("The input has no `created` stamp, so say who is adding it with --actor.") : error instanceof UnsafePath ? new CommandError(5, "unsafe_path", "That path leaves the project, is not a plain file, or would overwrite something. Nothing was written there.", [error.message]) : error instanceof AlreadyInitialized ? new CommandError(5, "already_initialized", "This directory already holds stemma.json; init changed nothing.") : new CommandError(70, "internal_error", `Internal error; no result may be read as a pass. ${error instanceof Error ? error.message : ""}`);
     if (json)
       process.stdout.write(canonical({ error: { code: known.code, message: known.message, paths: known.paths } }));
     else
