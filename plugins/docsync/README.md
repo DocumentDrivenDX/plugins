@@ -5,9 +5,13 @@ and bring the changes back as a small diff. Only the words that changed move;
 the rest of the file stays byte for byte as it was. Changes made in the
 repository go back into the doc without replacing it, so comments stay attached.
 
+It does the same with a **Word file** that co-authors edit, such as one in a
+folder that OneDrive, Dropbox or iCloud Drive syncs. docsync changes only the
+affected text in the `.docx`; it does not rebuild the file.
+
 docsync is a Claude plugin with one skill. Ask Claude to "open this chapter in a
-doc", "bring in the doc's edits" or "put my changes into the doc". Claude runs
-the commands.
+doc", "keep this chapter in step with the Word file in my shared folder", "bring
+in the edits" or "put my changes in". Claude runs the commands.
 
 It is a TypeScript port of
 [draftsync](https://github.com/DocumentDrivenDX/helix/tree/v0.25.0/tools/draftsync)
@@ -26,8 +30,27 @@ footnotes, and citation and span markers that stay intact.
   formatting, are listed for you to make in the doc.
 - **It checks nothing about what the text says.**
 
-See [the design](docs/design.md) for the rules and for what has and has not been
-tested.
+For Word files:
+
+- **Nothing is written without `--write`.** `pull` and `push` first show what
+  they would do. Read it.
+- **Try it on a copy first.** After your first push, check that your sync service
+  kept the file's share link and version history. The
+  [design](docs/word.md) says what has and has not been tested.
+- **When in doubt it leaves the change to you.** If some new text cannot be
+  written, changes that would remove words in the same sync are held back too.
+- **Citation markers are visible** in the Word file, and every one removed or
+  changed is listed. Footnotes are real Word footnotes.
+- **Push is narrower than pull.** New footnotes, links, lists, tables and
+  formatting changes are left for you to make in Word.
+- **Pending tracked changes are not accepted for you.**
+- **Some editors strip structure** when they save. docsync refuses to write when
+  that seems to have happened.
+- **No Word file goes into git.** A text snapshot of the last synced state does.
+  Before a push replaces a file, the old one is kept in `.git/docsync-backups/`.
+
+See the designs for [Claude Docs](docs/design.md) and [Word files](docs/word.md)
+for the rules and for what has and has not been tested.
 
 ## Install
 

@@ -1,7 +1,7 @@
 {
   "name": "docsync",
-  "version": "0.1.3",
-  "description": "Edit a Markdown file from your repository in a Claude Doc, with others, and bring the changes back as a small diff. Changes made in the repository go back into the doc without replacing it.",
+  "version": "0.2.0",
+  "description": "Edit a Markdown file from your repository with others, in a Claude Doc or a Word file in a shared cloud folder, and bring the changes back as a small diff. Changes made in the repository go back without replacing the doc or file.",
   "author": {
     "name": "DocumentDrivenDX",
     "url": "https://github.com/DocumentDrivenDX"

@@ -1,5 +1,8 @@
 # docsync design
 
+This document covers Claude Docs. [Word files](word.md) are the other target,
+with their own design and testing record.
+
 docsync keeps a Markdown file in a git repository and a Claude Doc in step, so
 that people and an agent can edit and comment in the doc while the repository
 holds the file. It is a TypeScript port of

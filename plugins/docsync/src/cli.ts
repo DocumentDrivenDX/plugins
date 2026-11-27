@@ -5,11 +5,12 @@ import { basename, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import pkg from "../package.json";
 import {
-  bodySha, committedBodySha, entryFor, findBase, git, locate, mark, read, saveBinding, sha256, status,
+  bodySha, committedBodySha, entryFor, findBase, git, loadBindings, locate, mark, read, saveBinding, sha256, status,
   type Binding,
 } from "./binding.ts";
 import { Doc, docOps, editsFromRead } from "./claude-docs.ts";
 import { applyText, parse, prepare, refuseCrlf, Refused, splitFrontMatter } from "./markdown.ts";
+import { bindWord, create, importDocx, locateWord, pullWord, pushWord, statusWord, type Options } from "./docx/cli.ts";
 import { Conflicted, merge3 } from "./merge.ts";
 import { parseXml, XmlError } from "./xml.ts";
 
@@ -24,7 +25,16 @@ const USAGE = `usage:
   docsync doc-ops FILE --old OLD.xml --now NOW.xml [--from-binding | --base-commit REV]
                 [--prefer git|doc]
   docsync rebind FILE --synced-rev N --old OLD.xml
-  docsync version`;
+  docsync version
+
+for a Word file:
+  docsync import DOCX                       print Markdown read from a .docx
+  docsync create FILE --word OUT.docx       write a first .docx; never overwrites
+  docsync bind FILE --word DOCX [--name NAME] [--record git|doc]
+  docsync locate FILE --word DOCX           say where this machine's copy is
+  docsync status FILE
+  docsync pull FILE [--prefer git|doc] [--guard PROGRAM] [--write] [--accept-loss]
+  docsync push FILE [--prefer git|doc] [--write] [--accept-loss]`;
 
 class Usage extends Error {}
 
@@ -36,12 +46,15 @@ const options = {
   origin: { type: "string" },
   connector: { type: "string" },
   record: { type: "string" },
+  word: { type: "string" },
+  name: { type: "string" },
   prefer: { type: "string" },
   guard: { type: "string" },
   "synced-rev": { type: "string" },
   "base-commit": { type: "string" },
   "from-binding": { type: "boolean" },
   write: { type: "boolean" },
+  "accept-loss": { type: "boolean" },
 } as const;
 
 /**
@@ -61,6 +74,32 @@ function passes(program: string, file: string, text: string): boolean {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+}
+
+/** git renders the diff, from two copies outside the repository. */
+function showDiff(current: string, result: string): void {
+  if (result === current) return;
+  const dir = mkdtempSync(join(tmpdir(), "docsync-diff-"));
+  try {
+    writeFileSync(join(dir, "current"), current);
+    writeFileSync(join(dir, "patched"), result);
+    const diff = Bun.spawnSync(["git", "diff", "--no-index", "--no-color", "--no-ext-diff", "--", "current", "patched"], { cwd: dir });
+    process.stdout.write(diff.stdout.toString());
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+/** A binding the Claude Docs commands may use. */
+function docEntry(root: string, path: string): Binding {
+  const entry = entryFor(root, path);
+  if (entry.tool === "word") throw new Refused(`${path} is bound to a Word file; use pull and push`);
+  return entry;
+}
+
+function isWordBound(file: string): boolean {
+  const { root, path } = locate(file);
+  return loadBindings(root).some((e) => e.path === path && e.tool === "word");
 }
 
 export function main(argv: string[], cwd = process.cwd()): number {
@@ -89,19 +128,37 @@ export function main(argv: string[], cwd = process.cwd()): number {
     return v;
   };
   const file = at(name);
+  const guard = (before: string, after: string) => {
+    if (!values.guard) return;
+    const program = values.guard.includes("/") ? at(values.guard) : values.guard;
+    if (passes(program, file, before) && !passes(program, file, after))
+      throw new Refused(`the guard ${basename(program)} passes on the file and fails on the edited file`);
+  };
+  if (command === "import") return importDocx(file);
+  if (command === "create") return create(file, at(need("word")));
+  const word = (): Options => ({
+    ...(values.word === undefined ? {} : { word: at(values.word) }),
+    name: values.name, record: side("record"), prefer: side("prefer"), write: values.write, acceptLoss: values["accept-loss"], guard, diff: showDiff,
+  });
+  if (command === "bind" && values.word !== undefined) return bindWord(file, word());
+  if (command === "locate") return locateWord(file, at(need("word")));
+  if (command === "pull") return pullWord(file, word());
+  if (command === "push") return pushWord(file, word());
+  if (command === "status" && isWordBound(file)) return statusWord(file);
+
   const current = read(file);
   refuseCrlf(current);
   const print = (value: unknown) => console.log(JSON.stringify(value, null, 2));
 
   const binding = (): Binding => {
     const { root, path } = locate(file);
-    return entryFor(root, path);
+    return docEntry(root, path);
   };
   /** The file as it was when the doc last matched it. */
   const baseText = (): string => {
     if (values["from-binding"]) {
       const { root, path } = locate(file);
-      return findBase(root, path, entryFor(root, path).baseSha256);
+      return findBase(root, path, docEntry(root, path).baseSha256);
     }
     const commit = values["base-commit"];
     if (!commit) return current;
@@ -127,6 +184,8 @@ export function main(argv: string[], cwd = process.cwd()): number {
       const { root, path } = locate(file);
       if (committedBodySha(root, path) !== bodySha(current))
         throw new Refused("the file's body differs from the committed one; commit it first so the base is in history");
+      if (loadBindings(root).some((e) => e.path === path && e.tool === "word"))
+        throw new Refused(`${path} is bound to a Word file; a file has one binding. Remove that entry first`);
       const connector = values.connector;
       const entry: Binding = {
         path, tool: "claude-docs", origin: need("origin"), ...(connector ? { connector } : {}),
@@ -139,7 +198,7 @@ export function main(argv: string[], cwd = process.cwd()): number {
     }
     case "rebind": {
       const { root, path } = locate(file);
-      const entry = entryFor(root, path);
+      const entry = docEntry(root, path);
       if (committedBodySha(root, path) !== bodySha(current))
         throw new Refused("the file's body differs from the committed one; commit it first");
       const xml = read(at(need("old")));
@@ -181,23 +240,8 @@ export function main(argv: string[], cwd = process.cwd()): number {
           );
         }
       }
-      if (values.guard) {
-        const program = values.guard.includes("/") ? at(values.guard) : values.guard;
-        if (passes(program, file, current) && !passes(program, file, result))
-          throw new Refused(`the guard ${basename(program)} passes on the file and fails on the edited file`);
-      }
-      if (result !== current) {
-        // git renders the diff, from two copies outside the repository.
-        const dir = mkdtempSync(join(tmpdir(), "docsync-diff-"));
-        try {
-          writeFileSync(join(dir, "current"), current);
-          writeFileSync(join(dir, "patched"), result);
-          const diff = Bun.spawnSync(["git", "diff", "--no-index", "--no-color", "--no-ext-diff", "--", "current", "patched"], { cwd: dir });
-          process.stdout.write(diff.stdout.toString());
-        } finally {
-          rmSync(dir, { recursive: true, force: true });
-        }
-      }
+      guard(current, result);
+      showDiff(current, result);
       console.log(`sha256 before ${sha256(current)}\nsha256 after  ${sha256(result)}`);
       console.log(`file hash ${result === current ? "unchanged" : "changed"}`);
       if (values.write && result !== current) {

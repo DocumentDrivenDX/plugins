@@ -1,6 +1,6 @@
 // Which doc a file is bound to: one entry in .docsync.json and a `docsync` git attribute.
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, relative, sep } from "node:path";
 import { Refused, splitFrontMatter } from "./markdown.ts";
 
@@ -44,6 +44,33 @@ export function locate(file: string): { root: string; path: string } {
   return { root, path: relative(root, real).split(sep).join("/") };
 }
 
+/**
+ * Writes a file of the repository by its own path. A repository can hold
+ * symbolic links, so none is followed: neither the file nor a directory above it.
+ */
+export function writeInRepo(root: string, path: string, text: string): void {
+  let at = root;
+  const parts = path.split("/");
+  parts.forEach((part, k) => {
+    at = join(at, part);
+    let found;
+    try {
+      found = lstatSync(at);
+    } catch {
+      if (k < parts.length - 1) mkdirSync(at);
+      return;
+    }
+    if (found.isSymbolicLink()) throw new Refused(`${parts.slice(0, k + 1).join("/")} is a symbolic link; docsync does not write through one`);
+  });
+  const temporary = `${at}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, text, { flag: "wx" });
+    renameSync(temporary, at);
+  } finally {
+    rmSync(temporary, { force: true });
+  }
+}
+
 export function loadBindings(root: string): Binding[] {
   const file = join(root, BINDINGS);
   if (!existsSync(file)) return [];
@@ -69,7 +96,7 @@ export function saveBinding(root: string, entry: Binding): void {
   const bindings = [...loadBindings(root).filter((e) => e.path !== entry.path), entry].sort((a, b) =>
     a.path < b.path ? -1 : 1,
   );
-  writeFileSync(join(root, BINDINGS), JSON.stringify({ version: 1, bindings }, null, 2) + "\n");
+  writeInRepo(root, BINDINGS, JSON.stringify({ version: 1, bindings }, null, 2) + "\n");
 }
 
 export function entryFor(root: string, path: string): Binding {
@@ -90,7 +117,7 @@ export function mark(root: string, path: string): void {
   if (/[\s"]/.test(pattern)) pattern = `"${pattern.replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"`;
   const file = join(root, ".gitattributes");
   const before = existsSync(file) ? read(file) : "";
-  writeFileSync(file, before + (!before || before.endsWith("\n") ? "" : "\n") + `${pattern} docsync\n`);
+  writeInRepo(root, ".gitattributes", before + (!before || before.endsWith("\n") ? "" : "\n") + `${pattern} docsync\n`);
   if (!marked(root, path)) {
     writeFileSync(file, before);
     throw new Refused(`could not write a .gitattributes line that marks ${path}; add one by hand`);
