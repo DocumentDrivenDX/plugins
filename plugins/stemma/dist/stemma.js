@@ -107548,7 +107548,7 @@ function loadCorpus(content) {
   for (const file of [settings, ...records])
     checkReferences(file, byId, unreadableIds);
   const texts = new Map(found.texts.flatMap((t) => idOf(t.manifest) ? [[idOf(t.manifest), t]] : []));
-  const corpus = { settings, records, partFiles: found.partFiles, texts, sources: content.sources, byId, manuscript: content.manuscript, research: content.research };
+  const corpus = { settings, records, partFiles: found.partFiles, texts, sources: content.sources, byId, manuscript: content.manuscript, research: content.research, binaries: content.binaries ?? (() => []) };
   if (content.rules)
     corpus.rules = content.rules;
   return corpus;
@@ -107697,6 +107697,10 @@ var TEMPLATES = {
   "record.valid:rule_heading_invalid": explain("A heading in rules.md is not a rule heading.", "Reports and records cite standing rules by ID, so a rule without one cannot be cited.", ["Write each rule heading as `## RULE-001 Title`."]),
   "record.valid:rule_id_duplicate": explain("A rule ID in rules.md is used twice.", "A report or record citing this ID could mean either rule.", ["Give the later rule a number that has never been used."]),
   "record.valid:check_error": explain("The check itself failed while running, so this was not checked.", "This is a defect in Stemma, not a pass.", ["Report the defect together with the Stemma version."]),
+  "project.binary:binary_file": explain("A binary file is in the repository, or would be added to it. A project holds text; originals and other binary files stay outside.", "git cannot show what changed in a binary, keeps every version for good, and nothing in it can be searched, checked or cited.", [
+    "Keep the file where the author holds it, outside the repository. To read or cite it, convert it with `source convert`: the Markdown in sources/ is tied to the original by its hash. For a format Stemma does not convert, note what it is, its hash and where it is held.",
+    "Moving the file out is the author's decision. A file already committed stays in git history until the history is rewritten."
+  ]),
   "cite.key:key_unknown": explain("A citation uses a key that no source record holds.", KEY_WHY, ["Correct the key in the citation, or add a source record with that key (or add it to the right source's key_aliases)."], ["repoint", "add_source", "remove_citation"]),
   "cite.key:key_ambiguous": explain("A citation uses a key that more than one source record holds.", KEY_WHY, ["Give each source its own key."], ["rename_key"]),
   "cite.key:key_missing": explain("A citation record names no citation key and no source.", KEY_WHY, ["Add the key of the source being cited, or remove the citation."], ["repoint", "remove_citation"]),
@@ -108327,6 +108331,23 @@ function planAnnotation(corpus, results, request) {
   if (problems.length > 0)
     throw new InvalidInput(`These values do not make a valid annotation record (${problems.map((p) => `${p.code} at ${p.field}`).join(", ")}).`);
   return { id, path: recordPath("annotation", id), text, finding: found };
+}
+
+// packages/core/src/checks/binaries.ts
+function binaryResults(corpus) {
+  const check = "project.binary";
+  const binaries = corpus.binaries();
+  if (binaries.length === 0) {
+    return [result({ check, outcome: "pass", subject: "project", locus: "files", evidence: [{ name: "binary_files", class: "metadata", value: "none found" }] })];
+  }
+  return binaries.map((path) => result({
+    check,
+    outcome: "fail",
+    reason: "binary_file",
+    subject: path,
+    locus: path,
+    evidence: [{ name: "file", class: "location", value: path }]
+  }));
 }
 
 // packages/core/src/checks/coordinates.ts
@@ -109719,6 +109740,7 @@ function label(results, skipped) {
 }
 var IMPLEMENTED_CHECKS = {
   "record.valid": recordResults,
+  "project.binary": binaryResults,
   "source.held": (c, x) => heldResults(c, x.texts),
   "source.pages": pageResults,
   "source.labels": labelResults,
@@ -110292,6 +110314,7 @@ function uncitedResults(corpus) {
 // packages/core/src/checks/not-run.ts
 var CHECK_DESCRIPTIONS = {
   "record.valid": "the extra rules for some record kinds in this project",
+  "project.binary": "binary files kept in the repository",
   "cite.key": "citation keys in the manuscript files",
   "bib.uncited": "bibliography entries that are never cited",
   "source.held": "whether each cited source's text is in the project",
@@ -112899,7 +112922,22 @@ async function readPdf(bytes, limits, assets = assetDirectory()) {
 
 // packages/workspace/src/index.ts
 import { randomBytes } from "crypto";
-import { appendFileSync, existsSync as existsSync2, lstatSync as lstatSync2, mkdirSync as mkdirSync2, readdirSync as readdirSync2, readFileSync as readFileSync2, realpathSync, renameSync as renameSync2, rmSync as rmSync2, writeFileSync as writeFileSync2 } from "fs";
+import { spawnSync } from "child_process";
+import {
+  appendFileSync,
+  closeSync as closeSync2,
+  existsSync as existsSync2,
+  lstatSync as lstatSync2,
+  mkdirSync as mkdirSync2,
+  openSync as openSync2,
+  readdirSync as readdirSync2,
+  readFileSync as readFileSync2,
+  readSync as readSync2,
+  realpathSync,
+  renameSync as renameSync2,
+  rmSync as rmSync2,
+  writeFileSync as writeFileSync2
+} from "fs";
 import { dirname as dirname2, isAbsolute, join as join3, relative, resolve, sep } from "path";
 
 // packages/workspace/src/fetch.ts
@@ -113134,13 +113172,50 @@ function listFiles(root, directory) {
     return entry.isDirectory() ? listFiles(root, path) : [sourceFile(root, path)];
   });
 }
+function isBinary(path) {
+  let handle;
+  try {
+    if (!lstatSync2(path).isFile())
+      return false;
+    handle = openSync2(path, "r");
+    const head = Buffer.alloc(8000);
+    const length = readSync2(handle, head, 0, head.length, 0);
+    const start = head.toString("latin1", 0, 5);
+    return head.subarray(0, length).includes(0) || start === "%PDF-" || start.startsWith("PK\x03\x04");
+  } catch {
+    return false;
+  } finally {
+    if (handle !== undefined)
+      closeSync2(handle);
+  }
+}
+var UNTRACKED_DIRECTORIES = new Set(["build", "node_modules"]);
+function walk(root, directory = "") {
+  let entries;
+  try {
+    entries = readdirSync2(join3(root, directory), { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.filter((e) => !e.name.startsWith(".")).flatMap((e) => {
+    const path = directory ? `${directory}/${e.name}` : e.name;
+    if (e.isDirectory())
+      return UNTRACKED_DIRECTORIES.has(e.name) ? [] : walk(root, path);
+    return e.isFile() ? [path] : [];
+  });
+}
+function repositoryFiles(root) {
+  const git = spawnSync("git", ["-C", root, "ls-files", "-z", "--cached", "--others", "--exclude-standard"], { encoding: "utf8", maxBuffer: 256 * 1024 * 1024 });
+  return git.status === 0 ? [...new Set(git.stdout.split("\x00").filter(Boolean))] : walk(root);
+}
 function readProject(root) {
   const content = {
     settings: sourceFile(root, "stemma.json"),
     records: listFiles(root, "records"),
     sources: listFiles(root, "sources"),
     manuscript: listFiles(root, "manuscript"),
-    research: listFiles(root, "research")
+    research: listFiles(root, "research"),
+    binaries: () => repositoryFiles(root).filter((path) => !/^(records|sources)\//.test(path) && isBinary(join3(root, path))).sort()
   };
   if (existsSync2(join3(root, "rules.md")))
     content.rules = sourceFile(root, "rules.md");
@@ -113199,7 +113274,9 @@ Write each rule under a level-two heading with a number that is never reused,
 for example "RULE-001 Spell the town as the charter does".
 `;
 var ATTRIBUTES = ["stemma.json", "rules.md", "records/**", "manuscript/**", "sources/**", "research/**/*.md"].map((p) => `${p} text eol=lf`);
-var IGNORED = [".stemma/", "build/"];
+var ORIGINAL_FORMATS = ["pdf", "doc", "docx", "odt", "rtf", "pages", "epub", "mobi", "ppt", "pptx", "key", "xls", "xlsx", "numbers", "zip"];
+var anyCase = (extension) => [...extension].map((c) => `[${c}${c.toUpperCase()}]`).join("");
+var IGNORED = [".stemma/", "build/", ...ORIGINAL_FORMATS.map((e) => `*.${anyCase(e)}`)];
 function addLines(root, path, lines) {
   const full = safeTarget(root, path);
   const present = existsSync2(full) ? readFileSync2(full, "utf8") : "";
@@ -113254,7 +113331,7 @@ import { resolve as resolve2 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.8",
+  version: "0.0.9",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
