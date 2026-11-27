@@ -43,7 +43,7 @@ command never uses the network.
 | Markers when writing back | any `[` or `]` leaves the change to a person | markers are plain text |
 | Comments in a read | refused | ignored |
 | Unaccepted suggestions | refused | left out and counted |
-| A block added in the doc and already landed in git | inserted into the doc again | recognized and not inserted; one that git then reworded is left to a person |
+| A block added in the doc and already landed in git | inserted into the doc again | recognized and not inserted, and later new blocks go after it; one that git then reworded, or a quote only partly in the doc, is left to a person |
 | Edit hook | `hook` command | not ported |
 
 **Markers** are footnote references `[^label]`, citation brackets holding

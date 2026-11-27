@@ -632,41 +632,49 @@ export function docOps(
   const bornInDoc = new Set(now.order.filter((id) => !old.tag.has(id)));
   const docWords = (id: string) => now.cells.get(id)?.map((c) => c.md).join(" ") ?? now.md.get(id) ?? "";
   const fileWords = (m: number) => unescapeMarkdown(blockTexts(file.lines, file.blocks[m]!).join(" "));
-  const landed = new Set<number>();
+  // A table row can only be a table row.
+  const sameShape = (id: string, m: number) => now.cells.has(id) === (file.blocks[m]!.kind === "row");
+  const landed = new Map<number, string>();
   // Every exact pair is found before any near one is guessed.
   for (const m of added) {
-    const id = [...bornInDoc].find((x) => alnum(fileWords(m)) !== "" && sameText(docWords(x), fileWords(m)));
+    const id = [...bornInDoc].find(
+      (x) => sameShape(x, m) && alnum(fileWords(m)) !== "" && sameText(docWords(x), fileWords(m)),
+    );
     if (id === undefined) continue;
     bornInDoc.delete(id);
-    landed.add(m);
+    landed.set(m, id);
   }
-  const nearly = new Set<number>();
+  const nearly = new Map<number, string>();
   for (const id of bornInDoc) {
     let best: number | undefined;
     let bestRatio = 0.8;
     for (const m of added) {
-      if (landed.has(m) || nearly.has(m)) continue;
+      if (landed.has(m) || nearly.has(m) || !sameShape(id, m)) continue;
       const r = likeness(alnum(docWords(id)), alnum(fileWords(m)));
       if (r >= bestRatio) [best, bestRatio] = [m, r];
     }
-    if (best !== undefined) nearly.add(best);
+    if (best !== undefined) nearly.set(best, id);
   }
+  const inDoc = (m: number) => landed.has(m) || nearly.has(m);
+  // Where each file block sits in the doc, so that a new one goes after its neighbour.
+  const placed = new Map([...anchors, ...landed, ...nearly]);
 
   for (const m of added) {
     const b = file.blocks[m]!;
-    if (landed.has(m)) continue;
-    if (nearly.has(m)) {
+    // A quote new in the file goes in whole, from its first paragraph, or not at all.
+    const members = b.quote ? file.blocks.flatMap((x, i) => (x.quote === b.quote ? [i] : [])) : [];
+    const wholeQuote = members.length > 0 && members.every((i) => isNew.has(i));
+    const partly = wholeQuote && members.some(inDoc) && !members.every((i) => landed.has(i));
+    if (nearly.has(m))
       report.push(`file block ${m}: the doc added a block much like it, with different text; compare them by hand`);
-      continue;
-    }
+    if (partly && members[0] === m)
+      report.push(`file block ${m}: the doc already has part of this new quote; compare them and add the rest by hand`);
+    if (inDoc(m) || partly) continue;
     let previous: string | undefined;
-    for (let k = m - 1; k >= 0 && previous === undefined; k--) previous = anchors.get(k);
+    for (let k = m - 1; k >= 0 && previous === undefined; k--) previous = placed.get(k);
     const before = file.blocks[m - 1];
     const after = file.blocks[m + 1]?.kind;
     const listy = (k?: Kind) => k === "item" || k === "row";
-    // A quote new in the file goes in whole, from its first paragraph.
-    const members = b.quote ? file.blocks.flatMap((x, i) => (x.quote === b.quote ? [i] : [])) : [];
-    const wholeQuote = members.length > 0 && members.every((i) => isNew.has(i));
     if (wholeQuote && members[0] !== m) continue;
     if (previous === undefined) {
       report.push(`file block ${m}: new, with nothing before it in the doc to anchor to; add it by hand`);
@@ -685,7 +693,7 @@ export function docOps(
       }
     } else if (
       b.kind === "row" && before?.kind === "row" && b.start - before.end <= 1 &&
-      now.tag.get(previous) === "row" && (anchors.get(m - 1) === previous || isNew.has(m - 1))
+      now.tag.get(previous) === "row" && (placed.get(m - 1) === previous || isNew.has(m - 1))
     ) {
       const cells = blockTexts(file.lines, b);
       if (cells.length !== now.cells.get(previous)!.length) {
