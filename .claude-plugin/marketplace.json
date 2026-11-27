@@ -15,6 +15,11 @@
       "name": "docsync",
       "description": "Edit a Markdown file from your repository in a Claude Doc, with others, and sync the changes both ways without overwriting either.",
       "source": "./plugins/docsync"
+    },
+    {
+      "name": "helix",
+      "description": "HELIX methodology, artifact catalog, and routing skill for AI-assisted development.",
+      "source": "./plugins/helix"
     }
   ]
 }
