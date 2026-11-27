@@ -1,0 +1,43 @@
+# Checks name what must be true, not the toolchain that proves it. The
+# adopting project supplies the concrete command for each automated check
+# (its test runner, coverage, audit, and lint commands); HELIX imposes no
+# technology choice.
+activity: test
+number: "03"
+
+entry_requirements:
+  automated: []
+
+  manual:
+    - "Relevant design decisions and constraints are clear"
+    - "Scoped outcomes have clear acceptance criteria"
+
+exit_requirements:
+  automated:
+    # Reuse the project's suites; no new suite per test layer is required.
+    - check: tests_exist
+      path: tests
+      description: "Test files exist"
+
+    # CI/CD configuration
+    - check: file_exists
+      path: .github/workflows/test.yml
+      fallback_paths:
+        - .github/workflows/ci.yml
+        - .gitlab-ci.yml
+        - Jenkinsfile
+        - .circleci/config.yml
+      description: "CI/CD pipeline configuration must exist"
+
+    # Quality checks on test files
+    - check: grep_present
+      pattern: "(describe|test|it|func Test|def test_)"
+      path: tests/**/*
+      description: "Test files contain test definitions"
+
+  manual:
+    - "Coverage plan identifies scoped requirements and meaningful tests"
+    - "Applicable new or existing tests exercise the scoped behavior"
+    - "Test infrastructure verified operational"
+
+next_activity: build

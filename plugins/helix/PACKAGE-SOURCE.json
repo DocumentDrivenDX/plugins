@@ -1,0 +1,7 @@
+{
+  "builder": "scripts/build-plugin-package.sh",
+  "builder_contract": 1,
+  "package": "helix-plugin",
+  "source_commit": "19fbf9bd6cae49916c5c40cbf19560e4fc577bca",
+  "version": "0.25.1"
+}

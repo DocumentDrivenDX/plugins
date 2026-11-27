@@ -1,0 +1,105 @@
+# Story Test Plan Generation Prompt
+
+Scope: one story's acceptance-criteria-to-test traceability — concrete new or existing tests, fixtures, commands, and setup for a single bounded slice.
+
+Related:
+- [Test Plan](../test-plan/prompt.md) — project-wide strategy this STP inherits
+- [Test Suites](../test-suites/prompt.md) — where these story tests live under `tests/`
+- [Test Procedures](../test-procedures/prompt.md) — how tests get written and run
+
+## Reference Anchors
+
+Use these local resource summaries as grounding:
+
+- `docs/resources/cucumber-executable-specifications.md` grounds acceptance
+  criteria as observable executable examples.
+- `docs/resources/google-test-sizes.md` grounds story test levels by scope,
+  dependency, and execution cost.
+
+## Storage Location
+
+`docs/helix/03-test/test-plans/STP-{id}-{name}.md`
+
+## What to Include
+
+- the governing `[[US-XXX-*]]` and `[[TD-XXX-*]]` references
+- a tight scope statement plus explicit out-of-scope boundaries
+- a matrix mapping each active acceptance criterion to concrete new or existing tests,
+  keyed by the story's **stable `US-<n>-AC<m>` ID** (this story-level matrix is
+  the AC↔test traceability surface; the project test plan aggregates strategy
+  and allocates layers but does not duplicate these rows — FEAT-008 FR-6). Each
+  row names the **behavior/assertion the test makes** (the observable outcome it
+  checks), not just a test name — a named test with no named assertion does not
+  show the criterion is *exercised*. Each row also names the **covering test AND
+  records that the test cites the AC ID** in the canonical, parseable syntax
+  `@covers US-<n>-AC<m>` — a test that exercises and passes but does not cite the
+  AC ID is `UNCITED_COVERAGE` (not covered for traceability; fix = add the
+  citation, not a new test), distinct from `UNTESTED`. Citation is an additional
+  gate on top of exercise+pass+satisfy, never a replacement
+- behavior-and-condition names and stable source citations per [testing practices](../../../../concerns/testing/practices.md)
+- planned report locations in existing Notes/Executable Proof; apply the
+  [verification contract](../../../../concerns/verification/practices.md) at completion
+- executable proof details: test file paths, commands, or named test cases
+- setup, fixtures, seed data, mocks, and environment assumptions
+- edge cases and error scenarios that the story must prove before build begins
+- build handoff notes that help implementation sequence the work
+
+## Minimum Quality Bar
+
+- Stay story-scoped. Do not drift into feature-wide strategy or generic testing doctrine.
+- Name runnable evidence, not just test categories.
+- Prefer one compact mapping table over repeated prose.
+- If an acceptance criterion is not being covered now, say why explicitly.
+
+## Boundary Test
+
+| If you are writing... | Put it in... |
+|---|---|
+| Project-wide test levels, coverage, and CI gates | Test Plan |
+| One story's concrete tests, fixtures, commands, and setup | Story Test Plan |
+| Product behavior or acceptance criteria | User Story / Feature Specification |
+| Implementation file changes | Technical Design / Implementation Plan |
+
+Use template at `workflows/activities/03-test/artifacts/story-test-plan/template.md`.
+
+## Diagnostic Proof
+
+Realize applicable `o11y-otel` obligations using the Diagnostic Proof template
+section and adopting-project pilot in `workflows/references/agent-diagnostics.md`.
+Name exact receiver/failure/correlation/privacy/retrieval tests and assertions;
+record untested limits explicitly. Project strategy belongs in Test Plan and
+story AC-to-test rows remain here. Do not substitute a schema parse or a mock
+exporter for actual OTLP receiver evidence on the real instrumentation path.
+
+## Journey Scenarios
+
+Optional. When a user flow or journey map spans this story, add one row per
+journey that passes through it: the journey's name, its path as the user
+flow's named transitions, the AC IDs it proves (they may belong to neighboring
+stories), and the end-to-end test and command that walk it. The AC mapping
+still owns per-criterion tests.
+
+## UX Coverage
+
+For affected interactive UI work, apply ux-interaction-patterns and
+workflows/references/ux-evidence.md. This section is optional for legacy
+structural validity; current affected UI handoff requires adoption. Each
+covered category references the existing AC mapping, which owns test names,
+assertions, @covers citations and commands. Mark absent patterns not-applicable
+with concrete reasons; runtime exceptions are reviewed in verification evidence.
+
+| Pattern | Disposition | AC IDs or Reason | Evidence |
+|---|---|---|---|
+| navigation | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+| keyboard-overlays | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+| async-actions | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+| forms | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+| data-states | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+| destructive-actions | covered / not-applicable | [stable AC IDs or exclusion reason] | [check run, or none] |
+
+The Evidence column is optional. It cites the presentation or accessibility
+check run behind a row: a committed report by its path, or, for a run whose
+output is not committed, the run date, command and where the report is kept.
+
+Structure checks only declared coverage integrity. Verify real test source and
+observed outcomes before completion; SDK lint/audit is separate evidence.

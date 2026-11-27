@@ -1,0 +1,186 @@
+# Metadata for Architecture
+
+artifact:
+  name: Architecture
+  id: architecture
+  type: document
+  activity: design
+
+voice: artifact-signal
+
+description: |
+  Captures the C4 views the team needs to build and review the system —
+  System Context, Container, Component (where helpful), Deployment, and
+  Data Flow — plus the quality attributes that constrain the design and
+  the architectural decisions that bind it. The architecture document is
+  the highest-authority structural artifact in the Design activity: solution
+  designs reference it, technical designs follow it, and operational
+  artifacts (runbook, monitoring, deployment) trace back to its quality
+  attributes.
+
+output:
+  location: docs/helix/02-design/architecture.md
+  format: markdown
+  naming: architecture.md
+  companions:
+    - path: docs/helix/02-design/architecture-model.toml
+      format: workflows/references/architecture-model.md
+      description: The model the architecture views are generated from; each element and relation cites the code that shows it
+
+validation:
+  required_sections:
+    - level_1_system_context
+    - level_2_container_diagram
+    - deployment
+    - data_flow
+    - quality_attributes
+    - decisions_and_tradeoffs
+
+  quality_checks:
+    - check: presentation_visual_review
+      description: When presentation quality is requested, apply diagram-design guidance and review rendered readability, semantic parity, exports, and stated limits
+      severity: warning
+
+    - check: walkthrough_evidence
+      description: When included, a walkthrough labels current/proposed state and traces a critical flow, failure paths, source ownership, proving tests, verification limits, and update triggers
+      severity: warning
+
+    - check: containers_named_real_tech
+      description: Every container in Level 2 names a specific technology, not just a role (e.g. "Postgres 15", not "Database")
+      severity: blocking
+
+    - check: nfrs_quantified
+      description: Quality attributes have measurable targets (RTO/RPO numbers, p99 latency, throughput, availability)
+      severity: blocking
+
+    - check: deployment_realistic
+      description: Deployment view names actual infrastructure — environments, instance counts, scaling strategy, backup/restore approach
+      severity: blocking
+
+    - check: decisions_traceable
+      description: Major architectural choices link to ADRs or include a decision/tradeoff note inline
+      severity: blocking
+
+    - check: c4_views_consistent
+      description: Containers in Level 2 are referenced consistently by Deployment and Data Flow views; nothing appears in one and not the others
+      severity: warning
+
+    - check: boundary_semantics
+      description: Source-work readiness requires adopted module ownership, protected invariants, minimal public APIs, style-compatible dependencies and executable boundary checks; structural validation alone does not prove these
+      severity: blocking
+
+    - check: scope_control
+      description: No code-level detail unless a Component view is genuinely needed; remove views that don't add review or implementation value
+      severity: warning
+
+  automated_checks:
+    - check: module_boundaries
+      type: module_boundaries
+      severity: blocking
+      message: A present Module Boundaries section must contain applicability and populated boundary evidence
+
+  pattern_checks:
+    - pattern: "\\[TBD\\]|\\[TODO\\]|\\[NEEDS CLARIFICATION"
+      expected: 0
+      message: Resolve uncertainty that materially affects the scoped work
+
+    - pattern: "\\[Tech\\]|\\[Name\\]|\\[Stack\\]|\\[Why\\]"
+      expected: 0
+      message: Replace template placeholders with concrete technology, names, and rationale
+
+variables:
+  - name: system_name
+    description: Name of the system being architected
+    required: true
+
+  - name: operating_environment
+    description: Where the system runs — cloud regions, on-prem, edge, single-tenant vs multi-tenant
+    required: true
+
+  - name: critical_user_journeys
+    description: The 1–3 user journeys whose performance and reliability matter most
+    required: true
+
+  - name: slo_targets
+    description: Service-level objectives — availability %, p99 latency, RTO/RPO
+    required: false
+
+  - name: security_compliance
+    description: Security and compliance constraints — auth model, data classification, regulated frameworks
+    required: false
+
+prompts:
+  generation: prompt.md
+  review: |
+    Review this Architecture document for:
+    1. Whether each C4 view adds information (drop views that don't)
+    2. Whether containers name real technologies and sized infrastructure, not generic roles
+    3. Whether quality attributes have measurable targets, not just adjectives
+    4. Whether the deployment view describes actual infra, not a wishlist
+    5. Whether major decisions trace to ADRs or include inline rationale
+    6. Whether the document stays implementation-relevant — no decorative architecture talk
+
+template:
+  file: template.md
+  sections:
+    - level_1_system_context: "Show the system, the actors, and the external systems. Skip if there's only one actor and no externals — that's noise."
+    - level_2_container_diagram: "Required. Each container names its technology, responsibilities, and how it communicates."
+    - component_diagram: "Optional. Include only when implementation choices need this level. Most teams ship without it."
+    - module_boundaries: "Include for new artifacts. Source projects record module ownership, public APIs, permitted/forbidden imports, integration owners, construction policy, and a check command; source-free projects give a reason. Legacy omission is an adoption/readiness gap, not structural invalidity."
+    - deployment: "Required when the system runs anywhere non-trivial. Name regions, instance counts, scaling triggers, backup paths."
+    - data_flow: "One sequence diagram for the most important user journey or operational flow. Pick the one most likely to fail."
+    - quality_attributes: "Each row needs a measurable target, the strategy that achieves it, and the verification method."
+    - decisions_and_tradeoffs: "Link to ADRs where they exist; capture the tradeoff inline where they don't."
+
+examples:
+  - file: example.md
+    description: DepositMatch architecture using C4 views, measurable quality attributes, and decision traceability
+
+references:
+  - title: "C4 Model"
+    file: docs/resources/c4-model.md
+    relationship: "Grounds context, container, component, and deployment views as audience-specific structural diagrams"
+  - title: "SEI Reasoning About Software Quality Attributes"
+    file: docs/resources/sei-quality-attribute-scenarios.md
+    relationship: "Grounds measurable quality attributes and tradeoff reasoning"
+  - title: "Microsoft Azure Well-Architected Framework"
+    file: docs/resources/microsoft-azure-well-architected-framework.md
+    relationship: "Grounds cross-cutting reliability, security, operations, performance, and cost tradeoffs"
+
+workflow:
+  creation_order: 1
+  review_cycles: 2
+
+relationships:
+  informs:
+    - solution-overview
+    - solution-design
+    - technical-design
+    - adr
+    - contract
+    - data-design
+    - security-architecture
+
+  referenced_by:
+    - solution-design
+    - technical-design
+    - deployment-checklist
+    - runbook
+    - monitoring-setup
+
+tags:
+  - design
+  - architecture
+  - c4
+  - structural
+
+version: 1.0.0
+last_updated: 2026-05-01
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: flow, form: network, question: "What does the system touch, and what touches it?", source: "architecture-model.toml (context view)"}
+  - {kind: flow, form: network, question: "What runs inside the system?", source: "architecture-model.toml (containers view)"}
+  - {kind: flow, form: zoned, question: "Where does each part run, and what travels between them?", source: "architecture-model.toml (deployment view)"}
+  - {kind: sequence, form: lifelines, question: "What happens, step by step, in one critical request?", source: "architecture-model.toml (a journey)"}
+  - {kind: structure, form: stack, question: "Where does each piece sit?", source: "architecture-model.toml (stack view)"}

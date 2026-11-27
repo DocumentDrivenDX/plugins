@@ -1,0 +1,8 @@
+input_gates:
+  - criteria: Problem and intended user outcome are clear
+    required: true
+    source: 01-frame
+    validation: Problem is clearly defined and worth solving
+  - criteria: Requirements and constraints documented
+    required: true
+    source: 01-frame

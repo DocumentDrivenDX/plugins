@@ -1,0 +1,575 @@
+# HELIX Action: Experiment
+
+You are performing one bounded experiment iteration within a metric-optimization
+session. The session is governed by a runtime work item when one applies, or by
+an explicitly named goal otherwise.
+
+Your goal is to hypothesize a change, implement it within scoped files, verify
+correctness, benchmark the result, make a keep/discard decision, log everything,
+and exit. The external loop (the experiment skill or the operator re-invoking
+this action) decides whether to continue iterating.
+
+This action performs one experiment iteration. It modifies only files declared in
+scope, does not change test expectations, and does not implement new features.
+Session state (`autoresearch.*`, `experiments/`) is ephemeral and gitignored on
+the experiment branch. The experiment is execution-layer work; the result is
+reported in the response (and on the governing work item when one applies), not
+as a canonical HELIX doc.
+The only normative artifact the experiment may create or update is a metric
+definition at `docs/helix/06-iterate/metrics/`.
+
+## Regression Bench (validating a methodology or skill change)
+
+When the change under test is a **methodology or skill change** (a workflow
+prompt, an artifact template, the routing skill) rather than product code, run
+it as a **regression bench**. The bench is the same `activity:iterate`
+machinery — metric definition, keep/discard rule, confidence scoring — applied
+to the question "does this change actually matter?" cheaply and without
+self-confirmation bias:
+
+1. **Record a baseline.** Fix a representative brief and run it against a
+   committed baseline of the methodology — the **bare prompt**, no improved
+   content. Record the intrinsic metrics it produces in a metric definition
+   (`baseline`/`target` fields; see the metric-definition template). Commit the
+   baseline so re-runs compare against a fixed point, not a moving memory.
+2. **Make the change.** Land the methodology/skill change under test.
+3. **Install the improved skill, then re-run from the bare prompt.** Re-run the
+   *same brief* with the improved skill **installed** — not by redirecting the
+   agent to read the changed files. Reading-by-redirection confounds the
+   result: it measures "agent told to use the new thing" instead of "the new
+   thing is in force." The bare prompt against the installed skill is the only
+   honest comparison.
+4. **Score intrinsic metrics against the baseline.** Use intrinsic,
+   mechanically checkable metrics (build/test pass, template conformance,
+   phantom-claim count, concern auto-selection, real-vs-stub output) — the same
+   metric-definition contract as any other experiment. Compare to the recorded
+   baseline.
+5. **Keep what moved; cut what didn't.** A change that does not move a metric
+   relative to baseline is **cut**, not kept on faith. "It feels better" is not
+   evidence; the bench is how a methodology change earns its place.
+
+The regression bench is the durable asset: it separates real wins from noise
+and is the standing answer to "how do we know this change is impactful." Fix
+the instrument before trusting its reading — a metric that disagrees with the
+template it scores (template↔meta drift) is a broken instrument, not a bad run
+(see the metric-definition `command_verified` check and FEAT-016).
+
+## Action Input
+
+You may receive:
+
+- a runtime work item ID
+- a goal description such as `optimize test-suite-runtime`
+- no argument, when a tracker is in use (auto-select a ready `activity:iterate`
+  work item)
+- a `--close` flag directing you to skip iteration and execute Step 3
+
+## Authority Hierarchy
+
+When artifacts disagree, use this hierarchy:
+
+1. Product Vision
+2. Product Requirements
+3. Feature Specs / User Stories
+4. Architecture / ADRs
+5. Solution Designs / Technical Designs
+6. Test Plans / Tests
+7. Implementation Plans
+8. Source Code / Build Artifacts
+
+Rules:
+
+- Higher layers govern lower layers.
+- Tests govern build execution but do not override requirements or design.
+- Source code reflects current state but does not redefine the plan.
+- If the goal or work item conflicts with its governing artifacts, do not implement the drift.
+- Prefer aligning code and docs to plan. Only propose plan changes when the
+  evidence is strong and the governing artifacts are stale or incomplete.
+
+## Tracker Rules
+
+Use a governing work item when the user supplies one, requests tracker-backed
+execution, or the runtime requires it (see
+`workflows/references/work-item-first.md`). Use the runtime-provided work-item
+source only. When a work item governs the run, it must be labeled
+`activity:iterate` (review and build/deploy items are excluded), and the
+session claims it at setup and records the result on it at session close.
+
+Without a governing work item, the experiment runs against the explicitly named
+goal and reports in the response. Create follow-on work items only when the user
+requests them or the runtime requires them.
+
+## STEP 0 - Bootstrap
+
+0. **Context Recovery**: Re-read AGENTS.md so project instructions are fresh
+   in your working memory. After long sessions, context compaction may have
+   dropped critical project rules. This step is cheap insurance against drift.
+0a. **Load active design principles** following
+   `workflows/references/principles-resolution.md`. Use them to inform metric selection and
+   experiment design decisions.
+0b. **Load active concerns and practices** following
+   `workflows/references/concern-resolution.md`. Experiments must use the declared concerns —
+   do not introduce alternative tools or frameworks as part of an optimization
+   experiment.
+1. When a work item governs the run, verify the runtime-provided work-item
+   source is available. Stop if it is unavailable.
+2. Follow `workflows/ratchets.md` and load floor fixtures if the project has
+   adopted quality ratchets.
+   Note the current floors so Step 3 can compare against them for auto-bump
+   decisions.
+3. Determine the invocation mode:
+   - If `--close` directive: skip directly to Step 3.
+   - If resuming (session files exist — `autoresearch.md` is present in the
+     worktree): read `autoresearch.md`, `autoresearch.jsonl`, and
+     `experiments/worklog.md` to recover session state. Skip to Step 2.
+   - If fresh start (no session files, no `--close`): proceed to Step 1.
+
+Resume detection is file-based, not flag-based. The presence of
+`autoresearch.md` in the worktree root is the authoritative signal that a
+session is in progress. This survives context compaction and agent restarts.
+
+## Resource envelope
+
+Apply `workflows/modes/experiment.md` before the first run, on resume and before
+each expansion. Keep cumulative limits, consumption and the unresolved decision
+in the existing session state. Baseline collection, verification, retries and
+parallel jobs share that envelope. Before launch, reserve workload and timeout
+within the remaining cumulative allowance, accounting for outstanding parallel
+jobs and bounded retries. When billing is late,
+use conservative workload/time bounds and report money as unknown; do not
+confuse a proxy limit with an enforced dollar cap. At a stopping condition,
+launch no further runs and stop outstanding work using available controls or
+operator intervention. Report anything still running, partial results and
+cleanup obligations without claiming convergence or successful cancellation.
+
+## STEP 1 - Session Setup
+
+This activity runs on the first invocation only. If resuming, Step 0 skips here.
+
+### 1.1 Target Selection
+
+Identify what the experiment optimizes:
+
+1. If the input is a work item ID: inspect that item.
+2. If the input is a goal description and a tracker is in use: search ready
+   `activity:iterate` items matching the goal; otherwise use the goal as given.
+3. If no input is given and a tracker is in use: inspect ready `activity:iterate`
+   execution items and choose the best candidate.
+
+The target MUST:
+
+- have passing tests (the project's test suite must be green before
+  experimenting)
+- have clear acceptance criteria or a stated goal defining what metric to
+  optimize
+- if it is a work item, be labeled `activity:iterate` and not be a review item
+  or a build/deploy item
+
+If no eligible target exists, report the reason and exit cleanly.
+
+### 1.2 Claim Work Item (when a work item governs)
+
+Claim the selected item via the runtime-provided work-item source.
+
+### 1.3 Authority Check
+
+Load the governing artifacts for the goal. When a work item governs, these are
+the artifacts it references:
+
+- `spec-id`
+- parent epic or parent issue
+- dependency tree
+- linked user story, feature, design, or test artifacts
+
+Verify the optimization goal is consistent with architecture and design docs.
+If the goal contradicts a higher-authority artifact, do not proceed.
+Document the conflict and exit.
+
+### 1.4 Metric Definition
+
+Load or create the primary metric definition:
+
+- If a metric definition exists at `docs/helix/06-iterate/metrics/<name>.yaml`,
+  read `name`, `unit`, `direction`, `command`, and `tolerance` from it.
+- If no metric definition exists, create one during setup using the
+  `workflows/templates/metric-definition.yaml` from the bound HELIX catalog.
+  Commit
+  the new metric definition to the canonical location
+  (`docs/helix/06-iterate/metrics/<name>.yaml`) before branching. This is a
+  normative artifact at authority level 5-6.
+
+Record:
+
+- **Primary metric**: name, unit, direction, measurement command
+- **Secondary metrics** (optional): additional metrics to capture for
+  monitoring/analysis but NOT used for keep/discard decisions
+- **Files in scope**: every file the agent may modify during this experiment
+- **Off-limits files**: files and directories that must NOT be modified
+- **Constraints**: additional rules (no new dependencies, no API changes, etc.)
+
+### 1.5 Correctness Check Definition
+
+Use `workflows/templates/autoresearch-session.md` and
+`workflows/templates/autoresearch-worklog.md` from the bound HELIX catalog.
+Define the correctness check command in `autoresearch.md` under a "Correctness
+Check" section. Use the project's standard test command (e.g., `npm test`,
+`cargo test`, `pytest`) from AGENTS.md or CI configuration. If the project
+defines `autoresearch.checks.sh`, use that instead.
+
+The correctness check is mandatory. Tests MUST pass after every iteration. If
+tests fail, the experiment is discarded regardless of metric improvement. This
+is non-negotiable — tests must pass at every step.
+
+### 1.6 Branch and Session Files
+
+1. Create the experiment branch:
+   `git checkout -b experiment/<goal>-<date>`
+
+2. Add session file patterns to `.gitignore` on the experiment branch and
+   commit:
+   ```
+   # Experiment session files (ephemeral, local-only)
+   autoresearch.md
+   autoresearch.sh
+   autoresearch.jsonl
+   experiments/
+   ```
+
+3. Create ephemeral session files (untracked, local-only):
+   - `autoresearch.md` — session doc, populated from the autoresearch-session
+     template. References the metric definition by path. Contains objective,
+     metrics, correctness check, files in scope, off-limits, constraints, and
+     "What's Been Tried" section.
+   - `autoresearch.sh` — benchmark script, derived from the metric definition's
+     `command` field. Must output `METRIC <name>=<value>` lines to stdout.
+     Make it executable (`chmod +x autoresearch.sh`).
+   - `experiments/worklog.md` — narrative log, populated from the
+     autoresearch-worklog template.
+   - `autoresearch.jsonl` — initialize with a config header line:
+     ```json
+     {"type":"config","goal":"<goal>","metric":"<name>","direction":"<lower|higher>","issue":"<id-or-null>","started":"<ISO-8601>"}
+     ```
+
+4. Session files are never committed. They are local working state for the
+   active agent session. They survive context compaction but not `git clone`
+   or branch push/pull.
+
+### 1.7 Baseline Measurement
+
+Run the benchmark script (`./autoresearch.sh`) to establish the baseline.
+
+Log the baseline as run #1:
+
+- Append to `autoresearch.jsonl`:
+  ```json
+  {"type":"result","run":1,"status":"baseline","metric":"<name>","value":<N>,"commit":"<hash>","timestamp":"<ISO-8601>","description":"Baseline measurement"}
+  ```
+- Write the baseline entry to `experiments/worklog.md`.
+
+The baseline is the reference point for all future keep/discard decisions and
+delta calculations.
+
+## STEP 2 - Single Experiment Iteration
+
+This is the core loop body. Each invocation executes exactly one iteration.
+
+### Step 1: Hypothesize
+
+Based on:
+
+- profiling data (if available)
+- prior results from `autoresearch.jsonl`
+- worklog insights from `experiments/worklog.md`
+- the "What's Been Tried" section of `autoresearch.md`
+
+Form a specific, testable hypothesis about what change will improve the primary
+metric. Record the hypothesis before making changes.
+
+### Step 2: Edit
+
+Modify only files declared in the "Files in Scope" section of
+`autoresearch.md`. Do not touch off-limits files. Do not change test
+expectations. Do not add new features.
+
+### Step 3: Correctness Check (FIRST)
+
+Run the project test suite (the command defined in `autoresearch.md` under
+"Correctness Check").
+
+- If tests FAIL: skip benchmarking entirely. Proceed directly to Step 5
+  with a discard decision. Do not waste time benchmarking broken code.
+- If tests PASS: proceed to Step 4.
+
+### Step 4: Benchmark
+
+Run `./autoresearch.sh` to measure the primary metric.
+
+Capture:
+
+- Primary metric value
+- Secondary metric values (if defined)
+- Wall-clock time of the benchmark run
+
+This step is only reached if the correctness check passed.
+
+### Step 5: Keep or Discard
+
+Apply the decision rules:
+
+**Keep** (metric improved AND tests passed):
+- `git add <scoped files only>`
+- `git commit -m "experiment: <brief description of change>"`
+- Record the commit hash for logging.
+
+**Discard** (metric worse, metric equal, OR tests failed):
+- `git checkout -- <file1> <file2> ...` (scoped revert only — list the
+  specific files from "Files in Scope", never `git checkout -- .`)
+- Do not delete untracked files created by the experiment; only revert
+  tracked scoped files.
+
+**Simplicity preference**:
+- A change that removes code or reduces complexity for equal or better
+  performance is always a keep.
+- A change that adds significant complexity for marginal improvement (below
+  the confidence threshold) should be discarded.
+- When two approaches yield similar metric values, prefer the simpler one.
+
+### Step 6: Log to JSONL
+
+Append the iteration result to `autoresearch.jsonl`:
+
+```json
+{"type":"result","run":<N>,"status":"<kept|discarded>","metric":"<name>","value":<N>,"delta_vs_baseline":"<+/-N%>","delta_vs_best":"<+/-N%>","commit":"<hash-or-null>","timestamp":"<ISO-8601>","description":"<hypothesis and what changed>","tests_passed":<true|false>}
+```
+
+Fields:
+
+- `run`: sequential iteration number (read from JSONL to determine next)
+- `status`: `kept` or `discarded`
+- `metric`: primary metric name
+- `value`: measured value (null if tests failed before benchmarking)
+- `delta_vs_baseline`: percentage change from run #1
+- `delta_vs_best`: percentage change from best kept result so far
+- `commit`: git commit hash if kept, null if discarded
+- `timestamp`: ISO-8601 timestamp
+- `description`: the hypothesis and what was changed
+- `tests_passed`: boolean
+
+### Step 7: Worklog Entry
+
+Append a narrative entry to `experiments/worklog.md` following the template
+format:
+
+```markdown
+### Run N: <description> -- <metric>=<value> (<KEPT or DISCARDED>)
+
+- Timestamp: YYYY-MM-DD HH:MM
+- What changed: <one to two sentences>
+- Result: <metric>=<value> (<delta vs best>)
+- Insight: <what was learned>
+- Next: <what to try based on this>
+```
+
+### Step 8: Confidence Scoring
+
+Read the full `autoresearch.jsonl` history. If 3 or more results exist
+(excluding the baseline), compute a confidence score:
+
+```
+confidence = |best_improvement| / MAD
+```
+
+Where:
+- `best_improvement` = best metric value minus baseline value (sign-adjusted
+  for direction)
+- `MAD` = median absolute deviation of all measured values from their median
+
+Interpretation:
+
+- `>= 2.0` — likely genuine improvement (signal well above noise)
+- `1.0 - 2.0` — marginal, above noise but not strongly significant
+- `< 1.0` — within noise floor, improvement may be measurement variance
+
+If fewer than 3 results exist, report confidence as `insufficient_data`
+in the summary.
+
+### Step 9: Update Session Doc
+
+Read `autoresearch.jsonl` to determine the total iteration count. If the
+iteration count is a multiple of 5, update the "What's Been Tried" section in
+`autoresearch.md` with:
+
+- Summary of the last 5 experiments
+- Key patterns observed across all experiments
+- Which approaches worked, which did not, and why
+
+This keeps the session doc useful for hypothesis formation in future iterations,
+especially after context compaction.
+
+## STEP 3 - Session Close
+
+This activity is invoked explicitly via a `--close` flag or by the skill when
+iteration is complete. It does NOT run during normal iteration.
+
+### 3.1 Authority Check
+
+Review the cumulative diff on the experiment branch against governing
+artifacts. Verify that the total set of changes is consistent with the goal's
+scope and the project's architecture. If the cumulative diff has drifted from
+the goal's intent, flag the problem and determine whether to proceed.
+
+### 3.2 Zero-Improvement Case
+
+Read `autoresearch.jsonl` to determine whether any iterations were kept.
+
+If no iterations were kept (best equals baseline):
+
+- Skip the squash-merge — there are no code changes to merge.
+- Report what was tried, how many iterations ran, and why nothing improved
+  (closing the governing work item with the same note, when one applies). This
+  is a valid outcome. Not every experiment produces improvement.
+- Proceed to cleanup (3.5).
+
+### 3.3 Ratchet Floor Update
+
+If the project has performance ratchets (loaded in Step 0) and the best
+result exceeds the current ratchet floor + auto-bump threshold:
+
+- Update the ratchet floor fixture file with the new floor value.
+- The floor update will be included in the squash commit.
+
+If the best result does not exceed the auto-bump threshold, do not update the
+floor. The improvement is real but not large enough to raise the committed
+floor.
+
+### 3.4 Squash-Merge
+
+If iterations were kept:
+
+1. Identify the original branch (the branch the experiment branch was created
+   from).
+2. Switch to the original branch:
+   `git checkout <original-branch>`
+3. Squash-merge the experiment branch:
+   `git merge --squash experiment/<goal>-<date>`
+4. Create the squash commit with a comprehensive message:
+   ```
+   experiment(<goal>): <one-line summary of result>
+
+   Issue: <issue-id, if any>
+   Metric: <name> (<unit>, <direction> is better)
+   Baseline: <baseline-value>
+   Final: <best-value> (<delta>% improvement)
+   Iterations: <total> run, <kept> kept
+   Confidence: <score>
+
+   Key changes:
+   - <summary of kept changes>
+
+   Ratchet floor updated: <yes/no, old -> new if yes>
+   ```
+5. If a ratchet floor update applies, ensure the updated floor fixture is
+   included in the squash commit.
+
+### 3.5 Cleanup
+
+Remove ephemeral session files (they are untracked local state):
+
+```bash
+rm -f autoresearch.md autoresearch.sh autoresearch.jsonl
+rm -rf experiments/
+```
+
+Delete the experiment branch:
+
+```bash
+git branch -d experiment/<goal>-<date>
+```
+
+### 3.6 Measure
+
+Record the timestamp, status, metric-improvement criterion pass/fail with evidence
+(baseline, final, delta), ratchet values, and experiment iterations/confidence.
+When a work item governs, record the same on it via the runtime-provided
+work-item source. See the measure action for the full pattern.
+
+### 3.7 Report and Close
+
+Report the session outcome:
+
+- Goal and optimization target
+- Baseline metric value
+- Final best metric value and delta
+- Total iterations run and kept count
+- Confidence score
+- Key insights from the experiment
+- Ratchet floor updates (if any)
+- Files modified in the final squash commit
+
+When a work item governs, close it via the runtime-provided work-item source
+with this summary as the close comment. This is execution evidence, not a
+canonical HELIX doc.
+
+### 3.8 Follow-On Opportunities
+
+If the experiment revealed additional optimization opportunities, code quality
+concerns, or architectural concerns, report them with evidence and a suggested
+next step. Create follow-on work items only when requested or required by the
+runtime; make them atomic and deterministic, with `spec-id` set to the nearest
+governing artifact.
+
+Do not silently absorb discovered work into the current experiment scope.
+
+## Session Status
+
+### Status Definitions
+
+- `RESOURCE_LIMIT` — a cumulative resource ceiling was reached or the next
+  run cannot fit the remaining allowance. Record the limiting resource,
+  measured/proxy consumption, unfinished work and any outstanding cleanup.
+  The outer loop must stop; a new invocation does not reset limits. Resume
+  only within the existing allowance after a smaller bounded run is feasible,
+  or after the operator authorizes a revised ceiling. This is not convergence
+  or a completed iteration, and never waives required verification.
+
+- `ITERATION_COMPLETE` — normal single-iteration exit. The skill or operator
+  decides whether to continue. This is the expected status for most
+  invocations.
+- `CONVERGED` — confidence >= 2.0 for 3 consecutive keeps with < 1% delta
+  between them. The metric has stabilized at an improved level. Further
+  iteration is unlikely to yield significant gains.
+- `NO_IMPROVEMENT` — no improvement in the last 5 consecutive iterations.
+  The experiment has stalled. The operator should consider closing the session
+  or changing strategy.
+- `CLOSED` — session close completed (Step 3 executed). The experiment
+  branch has been squash-merged (or skipped if zero improvement), any
+  governing work item has been closed, and session files have been cleaned up.
+
+These statuses describe experiment outcomes, not a runtime wire protocol.
+Use cumulative experiment history and current resource observations; a limit
+can stop work before an iteration finishes. Each invocation reads the full log to
+determine whether a convergence or stall pattern has emerged.
+
+Report these values in the summary:
+
+- iterations: total number of iterations run across all invocations (read from
+  `autoresearch.jsonl` run count).
+- kept: number of iterations whose changes were committed (status `kept` in
+  JSONL).
+- best: the best metric value achieved and its percentage improvement over the
+  baseline, as `<metric>=<value> (<delta>% vs baseline)`. If no improvement,
+  report the baseline value with `0%`.
+- confidence: the score from Step 8, or `insufficient_data` if fewer than 3
+  results exist, or `N/A` on `CLOSED` status.
+
+## Output Format
+
+Report these sections in order:
+
+1. Experiment Status
+2. Governing work item ID (if any)
+3. Current Iteration Summary (hypothesis, result, keep/discard decision)
+4. Cumulative Progress (iterations run, kept, best result, delta)
+5. Confidence Assessment
+6. Follow-On Opportunities (if any)
+7. Suggested Next Step (continue iterating, close session, change strategy)

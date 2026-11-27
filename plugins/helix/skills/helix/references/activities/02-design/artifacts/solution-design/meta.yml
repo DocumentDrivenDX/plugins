@@ -1,0 +1,211 @@
+# Metadata for Solution Design (Feature-Level)
+
+artifact:
+  name: Solution Design
+  id: solution-design
+  type: document
+  activity: design
+  level: feature
+
+voice: artifact-signal
+
+description: |
+  Feature-level solution design that explains the chosen approach for a
+  feature or cross-component capability. It maps requirements to a concrete
+  system shape, evaluates alternatives, and defines the decomposition that
+  story-level technical designs should inherit. It applies the Architecture and
+  relevant ADRs/contracts without redefining them.
+
+output:
+  location: docs/helix/02-design/solution-designs/SD-{id}-{name}.md
+  format: markdown
+  naming: SD-{feature-number}-{feature-name}.md
+  examples:
+    - SD-001-mcp-management.md
+    - SD-001-helix-supervisory-control.md
+
+validation:
+  required_sections:
+    - scope
+    - requirements_mapping
+    - solution_approaches
+    - domain_model
+    - system_decomposition
+    - traceability
+
+  quality_checks:
+    - check: umf_schema_basis_explicit
+      description: For new or changed schemas, structured interfaces, or domain models, identify inspected UMF definitions and pinned versions, reuse/composition or a specific justified exception, local additions, semantic/projection limits, authoritative source references and supported validation evidence; narrative-only work requires no model
+      severity: blocking
+    - check: presentation_visual_review
+      description: When presentation quality is requested, apply diagram-design guidance and review rendered readability, semantic parity, exports, and stated limits
+      severity: warning
+
+    - check: walkthrough_evidence
+      description: When included, a walkthrough labels current/proposed state and traces a critical flow, failure paths, source ownership, proving tests, verification limits, and update triggers
+      severity: warning
+
+    - check: diagnostic_flow_owned
+      description: For applicable o11y-otel practices, cross-component signal flow and ownership reference system decisions and shared Contracts without defining exact telemetry surfaces
+      severity: warning
+
+    - check: alternatives_evaluated
+      description: At least one alternative must be considered before selecting an approach
+      severity: blocking
+
+    - check: feature_level_scope
+      description: The design must stay feature-level and avoid collapsing into one-story implementation details
+      severity: blocking
+
+    - check: decomposition_defined
+      description: Major components or subsystems must be identified
+      severity: blocking
+
+    - check: review_requirements_mapping_covers_all_p0_01
+      description: >-
+        Requirements mapping covers all P0 functional requirements from the governing spec
+      severity: warning
+    - check: review_nfr_impact_section_shows_how
+      description: >-
+        NFR impact section shows how the architecture satisfies each non-functional requirement
+      severity: warning
+    - check: review_at_least_two_solution_approaches
+      description: >-
+        At least two solution approaches were evaluated with concrete pros/cons
+      severity: warning
+    - check: review_selected_approach_rationale_explains_why
+      description: >-
+        Selected approach rationale explains why alternatives were rejected
+      severity: warning
+    - check: review_domain_model_captures_entities_their
+      description: >-
+        Domain model captures all entities and their relationships
+      severity: warning
+    - check: review_business_rules_specific_enough_implement
+      description: >-
+        Business rules are specific enough to implement
+      severity: warning
+    - check: review_system_decomposition_assigns_requirement_at
+      description: >-
+        System decomposition assigns every requirement to at least one component
+      severity: warning
+    - check: review_component_interfaces_name_how_components
+      description: >-
+        Component interfaces name how components communicate and link Contract IDs for exact shared surfaces
+      severity: warning
+    - check: review_technology_rationale_explains_why_choice
+      description: >-
+        Technology rationale explains why each choice was made, not just what was chosen
+      severity: warning
+    - check: review_traceability_table_maps_requirement_component
+      description: >-
+        Traceability table maps every requirement to a component and test strategy
+      severity: warning
+    - check: review_gaps_section_lists_any_requirements
+      description: >-
+        Gaps section lists any requirements not fully addressed with mitigation plans
+      severity: warning
+    - check: review_concern_alignment_verifies_consistency_active
+      description: >-
+        Concern alignment verifies consistency with active project concerns
+      severity: warning
+    - check: review_design_consistent_governing_feature_spec
+      description: >-
+        Design is consistent with governing feature spec and PRD
+      severity: warning
+
+  pattern_checks:
+    - pattern: "SD-\\d{3}-"
+      expected: ">=1"
+      message: Must use numbered SD naming
+
+    - pattern: "Feature"
+      expected: ">=1"
+      message: Must identify the feature scope
+
+cross_references:
+  must_reference:
+    - Feature Specification (FEAT-XXX)
+
+  may_reference:
+    - PRD
+    - ADR-XXX
+    - Architecture
+    - Contracts
+
+variables:
+  - name: feature_id
+    description: Feature ID (e.g., 014)
+    required: true
+
+  - name: feature_name
+    description: Feature descriptive name
+    required: true
+
+prompts:
+  generation: prompt.md
+  review: |
+    Review this solution design for:
+    1. Clear feature-level scope
+    2. Explicit alternatives and trade-offs
+    3. Sound decomposition and domain model
+    4. Traceability from requirements to system shape
+    5. Clear boundary from story-level technical design work
+
+template:
+  file: template.md
+  sections:
+    - scope: "Feature scope and governing artifacts"
+    - requirements_mapping: "Requirements translated into technical capabilities"
+    - solution_approaches: "Alternatives and selected approach"
+    - domain_model: "Core entities and rules"
+    - system_decomposition: "Major components and interactions"
+    - traceability: "Requirement-to-design mapping"
+
+example:
+  file: example.md
+
+references:
+  - title: "arc42 Solution Strategy and Building Block View"
+    file: docs/resources/arc42-solution-strategy.md
+    relationship: "Grounds feature-level approach, decomposition, interfaces, and concise design rationale"
+  - title: "C4 Model"
+    file: docs/resources/c4-model.md
+    relationship: "Grounds component and interaction views that support feature-level decomposition"
+
+workflow:
+  creation_order: 1
+  review_cycles: 1-2
+
+relationships:
+  informed_by:
+    - feature-specification
+    - prd
+    - adr
+
+  informs:
+    - technical-design
+    - test-plan
+
+  references:
+    - architecture
+
+feature_progression:
+  previous: FEAT-XXX (Frame)
+  current: SD-XXX (Design)
+  next: TD-XXX / TP-XXX (Story-level design and test)
+
+tags:
+  - feature-level
+  - solution-design
+  - decomposition
+  - tradeoffs
+
+version: 1.0.0
+last_updated: 2026-03-27
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: structure, form: entities, question: "What does the domain model hold?", source: "the Domain Model section"}
+  - {kind: sequence, form: lifelines, question: "How do the components interact, in order?", source: "the Component Interactions section"}
+  - {kind: state, form: machine, question: "What states can the solution's main object be in?", source: "the design's state section"}

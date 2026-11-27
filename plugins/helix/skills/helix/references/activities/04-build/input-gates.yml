@@ -1,0 +1,13 @@
+input_gates:
+  - criteria: Coverage plan identifies scoped requirements and meaningful tests
+    required: true
+    source: 03-test
+    validation: Existing coverage and missing behavioral evidence are identified for the scoped behavior
+  - criteria: CI/CD pipeline configured for tests
+    required: true
+    source: 03-test
+    validation: Automated test execution on commits
+  - criteria: Source-code boundary baseline adopted before dependent feature work
+    required: true
+    source: 02-design
+    validation: For handwritten source, Module Boundaries and checker scaffold are present or sequenced as explicit prerequisites; bounded adoption work may establish them; source-free work has a reasoned non-applicability decision

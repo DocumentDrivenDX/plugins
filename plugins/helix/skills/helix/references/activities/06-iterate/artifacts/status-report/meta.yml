@@ -1,0 +1,71 @@
+artifact:
+  name: Status Report
+  id: status-report
+  type: document
+  activity: iterate
+
+voice: human-facing
+
+description: |
+  Point-in-time record of an iteration against its plan: outcome status with
+  evidence per claim, trades executed against the plan's trade rules,
+  blockers with the decisions they need, and next steps. The review or
+  checkpoint record that teams and stakeholders read; the runtime tracker
+  stays the live status surface.
+
+output:
+  location: docs/helix/06-iterate/status-report-[iteration-id]-[date].md
+  format: markdown
+  naming: status-report-[iteration-id]-[date].md
+
+validation:
+  required_sections:
+    - summary
+    - outcome_status
+    - changes_and_trades
+    - blockers_and_risks
+    - next_steps
+
+  quality_checks:
+    - check: status_traces_plan
+      description: Every outcome row must cite the iteration plan's outcome ID it reports against
+      severity: blocking
+    - check: evidence_cited
+      description: Every status claim cites evidence — done and at-risk cite proof or threat (demo, test result, metric), on-track cites observable progress, and dropped cites the trade or escalation
+      severity: blocking
+    - check: trades_reference_rules
+      description: Every executed trade must reference the plan's trade rules or name who approved the deviation
+      severity: warning
+    - check: decisions_name_decider
+      description: Every decision needed from another person names that decision maker
+      severity: warning
+prompts:
+  generation: prompt.md
+
+template:
+  file: template.md
+
+example:
+  file: example.md
+
+relationships:
+  informed_by:
+    - iteration-plan
+    - metrics-dashboard
+  informs:
+    - improvement-backlog
+
+tags:
+  - iterate
+  - status
+  - reporting
+  - iteration
+
+version: 1.0.0
+prose:
+  audience: human
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: metric, form: stat, question: "Is each number where it should be?", source: "the report's metrics"}
+  - {kind: metric, form: line, question: "How has each number changed?", source: "the report's metric history"}

@@ -1,0 +1,18 @@
+activity: design
+number: "02"
+
+entry_requirements:
+  automated: []
+
+  manual:
+    - "Governing intent states the scoped outcome and constraints clearly"
+    - "Requirements and constraints clearly documented"
+
+exit_requirements:
+  automated: []
+
+  manual:
+    - "Material architecture choices and tradeoffs are resolved"
+    - "Applicable security constraints reviewed"
+
+next_activity: test

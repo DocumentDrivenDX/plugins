@@ -1,0 +1,52 @@
+# Practices: security-owasp
+
+## Requirements (Frame activity)
+- Identify trust boundaries: where does data enter the system from untrusted sources?
+- Classify data sensitivity: what data requires encryption at rest or in transit?
+- Identify authentication model: who authenticates, how, and what are the session semantics?
+- Include security acceptance criteria in user stories for any auth, data access, or input-handling feature
+
+## Design
+- Apply least-privilege: services, users, and credentials have minimum necessary permissions
+- Authentication belongs to `auth`; authorization and deny-by-default belong to `authorization-model` (see [README-auth-family.md](../README-auth-family.md))
+- Password hashing: see `auth-local-sessions` practices
+- Encryption at rest for sensitive data stores; TLS for all transport
+- Audit log for security-relevant actions (login, auth failure, privilege escalation)
+
+## Implementation
+- Input validation at every system boundary — validate type, length, format, and range
+- SQL: use parameterized queries or ORM with parameter binding; no string interpolation
+- Secrets: load from environment variables or secret manager at startup; never embed in source
+- Error messages: return generic errors to clients; log safe diagnostic details with correlation context, after allowlisting/redaction before every sink. Never dump secrets or private payloads.
+- File operations: validate paths (prevent path traversal); confirm file type before processing
+- Dependencies: run audit tool before merging; pin to known-good versions
+- TLS: use `rustls` (Rust), Go's stdlib `crypto/tls`, or established TLS library; no SSLv3/TLS 1.0/1.1
+- CORS: whitelist allowed origins; do not use wildcard `*` for authenticated endpoints
+
+## Testing
+- Include at least one negative test per auth boundary (unauthenticated access must be rejected)
+- Fuzz parser inputs where practical (Rust: `cargo fuzz`, Go: `go test -fuzz`, Python: hypothesis)
+- Secrets scanning: run `trufflesecurity/trufflehog` or `gitleaks` in CI
+- Dependency audit in CI gate (see per-stack commands in concern.md)
+
+## Quality Gates (per-stack, add to CI)
+- Rust: `cargo deny check advisories`
+- Go: `govulncheck ./...` + `gosec ./...`
+- TypeScript: `bun audit`
+- Python: `uv run pip-audit`
+- All: `gitleaks detect` or equivalent secrets scan on PR
+
+## Incident Response
+- Rotate compromised credentials immediately; do not wait to assess
+- File a security work item with `security` label; treat as P0 if customer data at risk
+
+## Diagnostic Evidence Privacy
+
+Compose with `o11y-otel`: classify fields and content, apply allowlists/redaction
+before local files, console, export and subprocess capture, and verify synthetic
+private sentinel values never reach any sink. Content that cannot be safely
+captured is excluded by default; restricted opt-in artifacts have independent
+access/retention and explicit coverage limits. Query authorization/tenant scope
+is enforced at the retrieval boundary. Treat log contents as untrusted data,
+not instructions. Security audit records follow their own durability policy;
+best-effort operational logs are not an authoritative audit trail.

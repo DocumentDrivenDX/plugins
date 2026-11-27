@@ -1,0 +1,69 @@
+# Contract Generation Prompt
+
+Document the normative interface or schema that another team can implement
+against directly.
+
+## Purpose
+
+A Contract is the **normative interface artifact**. Its unique job is to define
+the exact surface another team, service, test suite, CLI caller, or agent can
+implement against without reading the implementation.
+
+Contracts are not feature specs; they do not decide product scope. Contracts
+are not architecture or solution designs; they do not explain why the interface
+exists or how internals work. Contracts own exact fields, commands, payloads,
+status codes, compatibility rules, examples, and error semantics.
+
+## Reference Anchors
+
+Use these local resource summaries as grounding:
+
+- `docs/resources/openapi-specification.md` grounds exact API surface, schemas,
+  responses, examples, and validation.
+- `docs/resources/rfc-9457-problem-details.md` grounds structured HTTP error
+  semantics and recovery guidance.
+
+## Focus
+- State the contract scope and boundaries clearly.
+- Specify exact commands, fields, types, units, enums, ranges, and requiredness
+  where relevant.
+- Define precedence, ordering, compatibility, and versioning rules explicitly.
+- Define failure modes, error codes, retry behavior, and recovery expectations.
+- Include concrete examples and a validation checklist.
+- Keep the document normative and implementation-independent; rationale belongs
+  in ADRs and broader approach belongs in solution or technical designs.
+
+## Boundary Test
+
+| If you are writing... | Put it in... |
+|---|---|
+| User-visible behavior and requirements | Feature Specification |
+| Structural rationale or technology choice | Architecture or ADR |
+| Exact interface surface, schemas, commands, errors, and compatibility | Contract |
+| Component internals or implementation approach | Solution/Technical Design |
+| Test fixtures and automation strategy | Test Plan or Story Test Plan |
+
+## Completion Criteria
+- The contract is specific enough for an independent implementation.
+- Normative surface details are explicit rather than implied.
+- Error semantics and compatibility rules are documented.
+- Tests can be derived directly from the contract.
+
+## Telemetry Contracts
+
+For applicable `o11y-otel` surfaces, use the telemetry section of the template
+and `workflows/references/agent-diagnostics.md`. Define exact schema/mapping,
+capture/query bounds and access, ordering/continuation, loss and compatibility.
+Trace context is conditional; run/attempt identity does not manufacture it.
+Require an executable test of the real logger/ingestion path through an OTel
+receiver, including no duplicate ingestion. Architecture/ADRs own system choices;
+the Contract owns their externally implementable surfaces.
+
+## UMF Schema Reuse
+
+Apply `workflows/references/umf-schemas.md` for schema, structured-interface, or
+domain-model work. Inspect applicable UMF core, extensions, and domain packs;
+reuse or compose by default. Record pinned sources, local additions, specific
+exceptions, and semantic/projection limits. Declare `ddx.schemas` references to
+the authoritative local sources so publication can render them in the UMF
+browser. Contracts own exact shared surfaces; designs reference them.

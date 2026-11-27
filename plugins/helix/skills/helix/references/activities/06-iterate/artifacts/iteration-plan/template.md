@@ -1,0 +1,85 @@
+---
+ddx:
+  id: iteration-plan
+  authoring:
+    home: repo
+---
+
+# Iteration Plan
+
+| | |
+|---|---|
+| **Iteration** | [id — e.g. IT-05, Sprint 3] |
+| **Dates** | [start → end] |
+| **Review** | [date and format of the iteration review] |
+| **Lead** | [who runs the iteration] |
+| **Roadmap Slot** | [roadmap order/iteration this fulfills; omit when there is no roadmap] |
+
+## Iteration Goal
+
+> [One falsifiable sentence: what is true at review that is not true now,
+> and what evidence shows it.]
+
+## Committed Outcomes
+
+Each participating workstream commits exactly one outcome per tier — one
+Good, one Better, one Best. Good is the protected floor: the iteration fails
+without it, and once committed its ID, text, and acceptance evidence are
+immutable for the iteration — a Good that becomes impossible is recorded as
+an escalation in the status report (decider named), never edited, re-tiered,
+or silently replaced. Best drops first under pressure, then Better. More
+outcomes per workstream is confusing; fewer breaks the flex model. A
+workstream sitting out this iteration is listed as not participating, never
+partially committed. (Participation is per-iteration; a workstream's
+registry status — active/closed — lives in the roadmap and is a different
+axis.) Outcome IDs are unique within this plan; the fully qualified form is
+`<iteration-id>.<outcome-id>` (e.g. `IT-05.WS-1-good`).
+Tier labels render as emoji plus a non-breaking space (U+00A0) so they never
+wrap in table cells: 🟢 Good · 🔵 Better · 🟣 Best.
+
+| ID | Workstream | Tier | Outcome | Owner | Governing Artifact | Acceptance Evidence |
+|----|------------|------|---------|-------|--------------------|---------------------|
+| [WS-1-good] | [WS-1] | 🟢 Good | [the outcome the iteration fails without] | [name] | [artifact ref] | [what proves it landed] |
+| [WS-1-better] | [WS-1] | 🔵 Better | [real value, first traded after Best] | [name] | [artifact ref] | [what proves it landed] |
+| [WS-1-best] | [WS-1] | 🟣 Best | [taken only if the iteration runs clean] | [name] | [artifact ref] | [what proves it landed] |
+
+**Not participating this iteration**: [WS-n (reason), or None]
+
+## Trade Rules
+
+- Best drops first, then Better — per workstream. [Who] calls trades and
+  records them in the status report.
+- Good outcomes are never traded: a Good at risk is an escalation, not a
+  trade.
+
+## Tasks
+
+The plan owns membership. Tasks can execute directly from the plan after user
+authorization. The Work Item column is optional: use existing IDs or create
+items only when tracking is explicitly selected. No item is required per task.
+Every committed outcome maps to at least one task. Task IDs are stable —
+never renumber mid-iteration — and unique within this plan (fully qualified:
+`<iteration-id>.<task-id>`, e.g. `IT-05.1.1`). The Status column records
+planning-time state (normally Backlog). When tracking is selected, the tracker
+owns live status; otherwise keep recovery evidence alongside the plan.
+
+Workstream aliases come from the roadmap's registry when one exists. A plan
+authored without a roadmap (single-workstream skip case) has one implicit
+workstream and omits aliases entirely; the moment a second workstream
+appears, author the roadmap's registry first. Aliases are unique within one
+flow instance. Work items preserve the alias: as a label where the runtime
+supports labels (e.g. `ws:WS-1`, prefixed with the flow instance when
+several flows share one store), otherwise in the item's title or reference
+field.
+
+### [WS-1 · workstream name]
+
+| ID | Task | Outcome | Owner | Due | Status | Work Item |
+|----|------|---------|-------|-----|--------|-----------|
+| [1.1] | [task] | [WS-1-good] | [name] | [date] | [Backlog] | [optional item ID, or — for direct execution] |
+
+## Risks
+
+| Risk | Impact | Response |
+|------|--------|----------|
+| [risk] | [H/M/L] | [action] |

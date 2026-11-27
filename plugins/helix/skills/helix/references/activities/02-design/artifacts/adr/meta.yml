@@ -1,0 +1,119 @@
+# Metadata for Architecture Decision Record (ADR)
+
+artifact:
+  name: Architecture Decision Record
+  id: adr
+  type: document
+  activity: design
+  level: project
+
+voice: artifact-signal
+
+id_format:
+  prefix: ADR
+  pattern: "ADR-[0-9]{3}"
+  example: ADR-001
+  description: |
+    Sequential three-digit number. Each ADR captures one architecture decision.
+    Numbers are never reused.
+
+description: |
+  An ADR documents a significant architectural decision: the context that drove
+  it, the alternatives considered, the chosen approach, and the consequences.
+  Each ADR covers exactly one decision. Accepted means the direction is chosen,
+  not that implementation is complete. Keep the current decision and useful
+  rationale in one living record.
+
+output:
+  location: docs/helix/02-design/adr/ADR-{number}-{decision-name}.md
+  format: markdown
+  naming: ADR-{number}-{decision-name}.md
+  examples:
+    - ADR-001-use-jsonl-for-tracker.md
+    - ADR-002-helix-activity-structure.md
+
+reuse_policy: |
+  Update the ADR in place when its decision or rationale changes, including a
+  reversal: rewrite the decision and record the replaced option under
+  alternatives with the reason it lost. Source control keeps the history.
+  Create a separate superseding ADR only when the user asks to keep the earlier
+  decision as its own record; then link them with `ddx.supersedes` and
+  `ddx.superseded_by`.
+
+validation:
+  required_sections:
+    - problem
+    - decision
+    - why_we_chose_this
+    - consequences
+
+  pattern_checks:
+    - pattern: "ADR-[0-9]{3}"
+      expected: ">=1"
+      message: Must carry a valid ADR identifier
+
+  quality_checks:
+    - check: single_decision
+      description: Each ADR must capture exactly one decision
+      severity: blocking
+
+    - check: alternatives_evaluated
+      description: At least one alternative is addressed, with why the chosen option beats it
+      severity: blocking
+
+    - check: consequences_explicit
+      description: Both positive and negative consequences must be stated
+      severity: warning
+
+    - check: decision_and_rationale
+      description: The decision is actionable, alternatives have concrete tradeoffs, and the selected option's rationale explains why it fits better than the strongest alternative
+      severity: blocking
+
+    - check: drift_signals
+      description: When the decision carries uncertainty, drift signals say what would reveal it being abandoned
+      severity: warning
+
+    - check: governing_context
+      description: Problem and decision align with governing requirements; concern impact is recorded only when the decision selects or overrides a concern practice
+      severity: warning
+prompts:
+  generation: prompt.md
+
+template:
+  file: template.md
+
+example:
+  file: example.md
+
+references:
+  - title: "Architectural Decision Records"
+    file: docs/resources/adr-github-organization.md
+    relationship: "Grounds ADRs as single-decision records with rationale, tradeoffs, and consequences"
+  - title: "Google Cloud Architecture Decision Records Overview"
+    file: docs/resources/google-cloud-architecture-decision-records.md
+    relationship: "Grounds ADR traceability to implementation context and architecture evolution"
+
+workflow:
+  review_cycles: 1
+
+relationships:
+  informed_by:
+    - prd
+    - feature-specification
+    - decision-brief
+
+  informs:
+    - solution-design
+    - technical-design
+
+tags:
+  - architecture
+  - decision-record
+  - design
+
+version: 1.0.0
+last_updated: 2026-04-05
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: comparison, form: matrix, question: "Which option, and why?", source: "the options considered"}

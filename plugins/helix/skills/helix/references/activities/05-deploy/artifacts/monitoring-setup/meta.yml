@@ -1,0 +1,82 @@
+artifact:
+  name: Monitoring Setup
+  id: monitoring-setup
+  type: document
+  activity: deploy
+
+voice: artifact-signal
+
+description: |
+  Service-specific observability and alerting setup required before or during
+  rollout.
+
+output:
+  location: docs/helix/05-deploy/monitoring-setup.md
+  format: markdown
+  naming: monitoring-setup.md
+
+validation:
+  required_sections:
+    - service_summary
+    - metrics_collection
+    - alerting_rules
+    - dashboards
+    - logs_and_tracing
+    - health_checks
+    - sli_slo_tracking
+    - alert_routing
+
+  quality_checks:
+    - check: otel_collection_and_limits
+      description: For applicable o11y-otel practices, reference the governing Contract and record actual collection route, optional trace context, duplication control, privacy, retention, query access and loss limits
+      severity: warning
+
+    - check: service_specific_signals
+      description: Metrics and alerts must be specific to the service rather than generic placeholders
+      severity: blocking
+    - check: alert_thresholds_defined
+      description: Alert conditions and routing must be explicit
+      severity: blocking
+    - check: health_checks_linked
+      description: Health checks should connect to rollout safety and operator verification
+      severity: warning
+    - check: alert_routing_owned
+      description: Alert routing should name primary, secondary, and escalation paths and link a runbook entrypoint once one exists
+      severity: warning
+
+prompts:
+  generation: prompt.md
+
+template:
+  file: template.md
+
+example:
+  file: example.md
+
+references:
+  - title: "Google SRE: Monitoring Distributed Systems"
+    file: docs/resources/google-sre-monitoring-distributed-systems.md
+    relationship: "Grounds operational signals, dashboards, alerting, and the four golden signals"
+
+workflow:
+  creation_order: 2
+  review_cycles: 1
+
+relationships:
+  informed_by:
+    - deployment-checklist
+    - architecture
+    - metrics-dashboard
+
+tags:
+  - deploy
+  - observability
+  - monitoring
+  - alerts
+
+version: 1.0.0
+last_updated: 2026-04-10
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: flow, form: network, question: "Which signals raise which alerts, and who receives them?", source: "the monitoring setup's signals and alerts"}

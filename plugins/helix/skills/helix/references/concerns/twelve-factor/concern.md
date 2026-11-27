@@ -1,0 +1,303 @@
+# Concern: Twelve-Factor App
+
+## Category
+
+infrastructure
+
+This is **infra**, not architecture. It does not decide internal layering,
+dependency direction, or how many deployables the system ships as — it governs
+the **per-process operational contract** every deployed process honors so it
+can be built, configured, scaled, and disposed of by a cloud platform without
+code changes. The decisions it forces (config from the environment, state
+externalized, logs to stdout, graceful shutdown) live in the
+deployment checklist/runbook, and the process-model section of the technical
+design — the operational-hygiene layer, not the application-design layer.
+
+## Areas
+
+infra
+
+## Boundary
+
+This concern is the **per-process operational contract** a deployed process
+honors so a platform can manage it. It is non-exclusive (no slot) and composes
+with three neighbors that must stay distinct:
+
+- **`deployment-topology`** decides **how many deployables the system ships as
+  and along which seams they split** (modular monolith vs microservices vs
+  serverless). Twelve-factor is **downstream and orthogonal**: it is the
+  operational contract **each** of those deployables honors regardless of how
+  many there are. One modular monolith and a fleet of microservices both run as
+  twelve-factor processes; topology decides the count, twelve-factor decides
+  what each process must be. This concern does **not** restate the
+  forcing-function / fault-line / distributed-monolith rules.
+- **`o11y-otel`** decides **what telemetry to emit and how it is
+  structured** — traces, RED metrics, structured-JSON log schema, trace
+  context. Twelve-factor decides only the **logs-as-event-streams transport
+  rule**: the service streams to **stdout by default** and never manages log
+  files or rotation itself; the execution environment captures/routes it.
+  CLI/MCP diagnostic streams and supported native OTLP routes follow the
+  transport qualifications below. The two **compose**: o11y says
+  *what each log line contains*, twelve-factor says *where the process puts it*.
+  This concern does **not** specify log schema, span naming, or metric names.
+- **`k8s-kind`** (and any `deploy-target` filler) is the **runtime that
+  consumes a twelve-factor process** — the cluster, Helm charts, image builds,
+  the env-var/secret injection, the SIGTERM lifecycle, the port it binds. The
+  twelve-factor process is the *thing being deployed*; the deploy-target is the
+  *platform deploying it*. A process that honors this contract (config from env,
+  port binding, graceful shutdown, stateless, scale-by-process) is the input a
+  platform expects; this concern does **not** specify cluster/Helm/image-build
+  mechanics. They are designed to fit together.
+
+## Components
+
+The twelve factors, grouped by what each protects:
+
+### Build-time hygiene (codebase, dependencies, build/release/run)
+
+- **Codebase** — one codebase tracked in revision control, **many deploys**.
+  One repo per app; multiple apps sharing code do so via declared dependencies,
+  not a shared codebase. The same codebase produces every deploy (dev,
+  staging, prod), which differ only by config.
+- **Dependencies** — dependencies are **explicitly declared** (a manifest) and
+  **isolated** (a dependency-isolation tool), so the app never relies on
+  system-wide packages leaking in. No implicit reliance on tools existing on
+  the host.
+- **Build, release, run** — **strictly separate** the three stages. *Build*
+  turns code into an executable bundle; *release* combines a build with that
+  deploy's config into an immutable, uniquely-versioned artifact; *run* executes
+  the release. Releases are immutable and **cannot be mutated at runtime** —
+  any change is a new release. Code cannot be changed at run time (no editing
+  on the running box).
+
+### Config + resources (config, backing services)
+
+- **Config** — in the original factor, everything that **varies between deploys** lives in the
+  **environment** (env vars), not in code or checked-in per-environment config
+  files. Credentials, resource handles, and per-deploy hostnames are env vars,
+  each orthogonal and independently managed. **Litmus test:** the codebase could
+  be made open source at any moment without leaking a single credential. The
+  original factor rejects grouped `config/production.rb`-style "environments"
+  (combinatorial explosion) in favor of granular per-deploy env vars. **HELIX
+  position:** keep the litmus test and the per-deploy independence, but split
+  config by **owner** (see Constraints) — dev-owned defaults and non-secret
+  per-environment values live in committed files; only ops-owned values are
+  injected at deploy time, by whatever mechanism (env vars, mounted files, a
+  secret manager).
+- **Backing services** — every service consumed over the network (database,
+  cache, queue, SMTP, object store, third-party API) is an **attached
+  resource** referenced only by a config-supplied handle. Local Postgres and
+  Amazon RDS are the same kind of resource to the code; swapping one for the
+  other is a **config change, not a code change**. No code distinguishes a
+  local resource from a third-party one.
+
+### Process model (processes, port binding, concurrency)
+
+- **Processes** — the app executes as **one or more stateless,
+  share-nothing processes**. Any data that must persist goes to a stateful
+  backing service. **No sticky state** held in process memory or local disk
+  across requests — no in-memory session store assumed to survive, no reliance
+  on a request hitting the same process (no sticky sessions).
+- **Port binding** — the app is **completely self-contained** and exports its
+  service by **binding to a port** itself (it ships its own HTTP server), rather
+  than being injected into a runtime webserver container. The port is supplied
+  by the environment; one app's exported service can be another's backing
+  service.
+- **Concurrency** — scale **out via the process model**: handle diverse
+  workloads with multiple process *types* (web, worker, clock) and scale each
+  type **horizontally** by running more processes. Processes do not daemonize or
+  write PID files; rely on the platform's process manager.
+
+### Lifecycle + parity (disposability, dev/prod parity, logs, admin processes)
+
+- **Disposability** — processes are **disposable**: **fast startup** (a few
+  seconds to ready) so scaling and deploys are nimble, and **graceful shutdown
+  on SIGTERM** — stop accepting new work, drain in-flight work, exit. Workers
+  return unfinished jobs to the queue (NACK / auto-requeue) and **all jobs are
+  reentrant/idempotent**, so the app is also **robust against sudden death**
+  (crash-only): an unexpected kill leaves no corruption.
+- **Dev/prod parity** — keep dev, staging, and prod **as similar as
+  possible**, closing the **time gap** (deploy in hours, not weeks), the
+  **personnel gap** (authors operate what they ship), and the **tools gap** —
+  most importantly, use the **same type and version of each backing service**
+  across all environments (no SQLite-in-dev / Postgres-in-prod substitution).
+- **Logs** — treat logs as **event streams**: services use platform-captured
+  stdout by default; CLI/MCP diagnostics use stderr when stdout carries results
+  or protocol traffic. A supported native OTLP route is a documented project
+  choice. The execution environment owns storage/rotation, including local/CI
+  runner capture. Structure/content remain `o11y-otel`'s concern.
+- **Admin processes** — run admin/management tasks (migrations, one-off
+  scripts, REPL/console) as **one-off processes against an identical release**:
+  same codebase, same config, same dependency isolation as the long-running
+  processes — not as ad-hoc commands on a hand-configured box.
+
+## Constraints
+
+### Config is layered by owner; secrets and ops handles never live in the codebase
+
+- Everything that varies between deploys is supplied by the **environment** or
+  an injected, non-committed source (env vars, mounted secret files, a secret
+  manager). **No credential or ops-owned handle (hostname, endpoint, port
+  assigned by the platform) is committed** to the repo — the open-source
+  litmus test must hold. Checked-in per-environment files are allowed only for
+  dev-owned, non-secret values (layer 2 below); a repo `production`/`staging`
+  file holding credentials or ops-owned handles is rejected.
+- The process reads config through **one typed, validated config object** built
+  at startup, not scattered direct env reads; the mechanism is owned by the
+  selected `language-runtime` concern.
+- **Config has three layers, split by owner** (precedence high to low):
+  1. **Ops-injected** — values dev cannot know or must not hold: backing-service
+     handles (database host, endpoints), credentials, secrets. Delivered at
+     deploy time by env vars, mounted files, or a secret manager; the code does
+     not care which.
+  2. **Committed per-environment file** — dev-owned, reviewed, non-secret
+     values that differ by environment (log level, replica counts, flag
+     settings), e.g. `config/<env>.<ext>`. `<env>` is selected by a single
+     ops-injected key (e.g. `APP_ENV`), read by the config module before the
+     layered load.
+  3. **Committed defaults** — dev-owned values that rarely or never change,
+     defined once in the config schema and a base file `config/default.<ext>`.
+- **Each key has exactly one owner.** The schema marks ops keys *required, no
+  default* and dev keys *defaulted*. Ops handles (hostnames, endpoints) and
+  secrets never appear in committed files, even when not secret. The schema is
+  the contract at the ops/dev boundary and the source of the runbook's config
+  surface. Ops may override a dev-owned key at deploy time as an incident
+  override, not as a standing per-environment value (that belongs in layer 2).
+  `.env.example` is the one committed file that names ops keys; it lists every
+  key with a placeholder or a localhost-only value.
+- Platform exceptions: `databricks-apps` allows non-secret ops handles in
+  bundle `targets:`.
+
+### Backing services are swappable by config alone
+
+- Every networked dependency is an **attached resource** addressed only through
+  a config-supplied handle. Code MUST NOT branch on whether a resource is local
+  or third-party. Swapping a backing service (local DB → managed DB, local SMTP
+  → email API) MUST be possible with a **config change and zero code change**.
+
+### Processes are stateless and share-nothing
+
+- No state needed across requests is held in process memory or on local disk.
+  Persistent state goes to a backing service. The app MUST NOT assume sticky
+  sessions, an in-process cache that survives a restart, or that a follow-up
+  request reaches the same process. Scaling is horizontal across share-nothing
+  processes.
+
+### Build, release, run are separated and releases are immutable
+
+- The artifact that runs is an **immutable, versioned release** (a build + that
+  deploy's config). It MUST NOT be mutated at run time; any change is a new
+  release with a new version. No editing code or config on a running instance.
+
+### Disposable: fast startup, graceful SIGTERM shutdown, crash-safe
+
+- Processes start in seconds and shut down gracefully on **SIGTERM** (refuse new
+  work, drain in-flight, exit). Worker jobs are **reentrant/idempotent** and
+  returned to the queue on interruption, so a sudden kill never corrupts state.
+
+### Logs use platform capture; the process does not manage log files
+
+- Services stream to **stdout by default**; CLI/MCP diagnostics use **stderr**
+  when stdout carries results/protocol traffic. A supported platform-native
+  OTLP route may be selected in the technical design; it must preserve bounded queue/flush
+  behavior and disclose export loss under `o11y-otel`.
+- The deployed application does **not** open or rotate log files. The environment
+  owns routing/retention; a development/CI runner may capture safe streams into
+  local files and own their rotation. Verify one canonical ingestion route to
+  avoid duplicates. What each record contains remains `o11y-otel`'s concern.
+
+### Dev/prod parity — same backing services across environments
+
+- Dev, staging, and prod use the **same type and version of each backing
+  service**. A lightweight local substitute that differs from production (e.g.
+  SQLite locally, Postgres in prod) is a parity gap to reject.
+
+### Admin tasks run as one-off processes on an identical release
+
+- Migrations and one-off scripts run in the **same release** (code + config +
+  dependency isolation) as the app's long-running processes — not as commands
+  hand-run against a bespoke environment.
+
+## Drift Signals (anti-patterns to reject in review)
+
+- A credential or ops-owned handle (hostname, endpoint) **committed to the
+  repo**, including in a `config/<env>.*` file → fails the open-source litmus
+  test; move it to an ops-injected source
+- Code that **branches on local-vs-third-party** for a backing service, or a
+  service that cannot be swapped without a code change → make it an attached
+  resource addressed by a config handle
+- **Sticky state in process memory / local disk** assumed across requests
+  (in-process session store, sticky sessions, a cache that must survive a
+  restart) → externalize to a backing service; make processes share-nothing
+- A **mutated running instance** (code/config edited in place) or a release
+  that is not immutable + versioned → rebuild a new release; never mutate at run
+  time
+- **No SIGTERM handling** (process killed mid-request, jobs lost on shutdown),
+  slow startup, or **non-idempotent jobs** that corrupt on re-run → add graceful
+  drain + reentrant jobs
+- The deployed app **writing/rotating its own log files** → use the selected
+  platform route (stdout by default, qualified for CLI/native OTLP); let the
+  environment or development runner own capture and rotation
+- A **different backing service in dev than prod** (SQLite vs Postgres, an
+  in-memory queue vs the real broker) → align type and version across
+  environments
+- A migration / admin task run as an **ad-hoc command on a hand-configured box**
+  rather than a one-off process on an identical release → run it in the release
+- Twelve-factor rules conflated with the **topology** (`deployment-topology` —
+  how many deployables) or the **runtime** (`k8s-kind` — the platform) → keep
+  them separate; this concern is the per-process contract
+
+## When to use
+
+Select for **any deployed long-running service or app** — anything that runs as
+a process a platform manages and that has config and/or backing services. The
+contract is what lets that process be deployed, configured, scaled, and disposed
+of without code changes.
+
+**Skip** for artifacts with no per-process operational contract to honor:
+**libraries** (consumed in-process, no deploy/config/backing-services surface),
+**static / marketing sites** (no running process, no config in the environment),
+and **CLIs with no config or backing services** (a one-shot tool with nothing to
+externalize). A CLI or tool that *does* read config and talk to backing services
+is a deployed-process-like surface and may select it.
+
+It **composes** (no slot) with `deployment-topology` (which decides how many
+deployables each honor this contract), `o11y-otel` (which structures the events
+this concern sends through platform capture), and `k8s-kind` / the `deploy-target` filler
+(the runtime that consumes the twelve-factor process). `areas: infra` scopes its
+practices to the infrastructure / process-contract work items.
+
+### Selection signal (verbatim — propose for concern-resolution)
+
+> Select **twelve-factor** for any **deployed service or app** — anything that
+> runs as a platform-managed process and has config and/or backing services. It
+> is the **per-process operational contract** each deployable honors: config and
+> secrets supplied from the environment (open-source litmus test holds), backing
+> services as attached resources swappable by config alone, stateless
+> share-nothing processes, immutable build/release/run separation, fast startup
+> with graceful SIGTERM shutdown and reentrant jobs, logs via platform capture
+> (stdout by default with CLI/native-OTLP qualifications; no app-owned rotation), the same backing services across
+> dev/staging/prod, and admin tasks run as one-off processes on an identical
+> release. Do **not** select it for a **library**, a **static/marketing site**,
+> or a **CLI with no config or backing services** — there is no per-process
+> contract to honor. It composes with `deployment-topology` (how many
+> deployables), `o11y-otel` (the event structure it streams), and `k8s-kind` /
+> the `deploy-target` filler (the runtime that consumes the process); it does
+> not decide any of those.
+
+## Artifact Impact
+
+Selecting this concern requires these artifacts to change (a selected concern absent from them is drift):
+- TD: states the config + state + backing-services strategy (env-sourced config, attached resources, stateless processes) and build/release/run + disposability; process model (stateless share-nothing, port binding, concurrency), platform-captured logs with CLI/native-OTLP qualifications, graceful SIGTERM, admin-as-one-off
+- IMPLEMENTATION_PLAN: deployment checklist/runbook — env-var config, dev/prod parity, immutable releases, migrations as one-off processes
+
+## ADR References
+
+Selecting this concern needs no ADR; `concerns.md` records it. Write an ADR only
+when the project deviates from a constraint here. The technical design MUST
+state the **config + state + backing-services strategy** (where config and
+secrets come from, which services are attached resources, where persistent and
+session state live) and the build/release/run and disposability contract. A material
+uncertainty (an unproven backing-service choice, an undecided secrets source) is
+a `tech-spike`, not a silent gap (see
+`workflows/references/concern-resolution.md`).

@@ -1,0 +1,162 @@
+# Practices: Twelve-Factor App
+
+These practices make the **per-process operational contract** checkable in
+review. They govern **how each deployed process is configured, holds state,
+binds, scales, shuts down, and logs** — not how many deployables there are
+(`deployment-topology`), not the structure of the telemetry it emits
+(`o11y-otel`), and not the runtime that hosts it (`k8s-kind` / the
+`deploy-target` filler). Each item is reviewer-checkable: a reviewer can point
+at the codebase, the release artifact, or the runbook and confirm or reject it.
+
+## Config and secrets in the environment
+
+- Config that **varies between deploys** (credentials, resource handles,
+  hostnames, third-party API keys) and is ops-owned MUST come from an
+  injected, non-committed source (env vars, mounted secret files, or a secret
+  manager), not from code or committed files. Prefer file or secret-manager
+  delivery for secrets, since env vars leak via child processes, crash dumps,
+  and `/proc`. Reviewer check: **grep the repo for credential/connection-string
+  literals and for ops-owned handles in committed config files** — there MUST
+  be none. Committed per-environment files are allowed for dev-owned,
+  non-secret values only.
+- The **open-source litmus test** MUST hold: the codebase could be made public
+  right now without leaking any credential.
+- Per-deploy ops-owned config MUST be independently injectable keys (env vars,
+  mounted files, or a secret manager) — not a checked-in bundle of credentials
+  or hostnames that grows combinatorially.
+- Config MUST be layered by owner, high to low precedence: **ops-injected**
+  (handles, credentials, secrets) over a **committed per-environment file**
+  (dev-owned, non-secret, `config/<env>.<ext>`) over **committed defaults**
+  (schema defaults plus `config/default.<ext>`). Each key has ONE owner; the
+  schema marks ops keys required with no default. Reviewer check: no ops-owned
+  key has a committed value, and no dev-owned default is duplicated in an
+  ops-injected source.
+- The process MUST read config **through one typed, validated config object**
+  built at startup (failing fast on missing or invalid values), not by scattered
+  direct env reads. The mechanism is per language — see the selected
+  `language-runtime` concern (`python-uv`, `typescript-bun`, `rust-cargo`,
+  `go-std`, `scala-sbt`).
+
+## Backing services as attached resources
+
+- Every networked dependency (database, cache, queue, SMTP, object store,
+  external API) MUST be addressed only through a **config-supplied handle**.
+- Code MUST NOT **branch on whether a resource is local or third-party**.
+  Reviewer check: swapping a backing service (local DB → managed DB, local SMTP
+  → email API) is a **config change with zero code change**.
+
+## Build, release, run separation
+
+- The artifact that runs MUST be an **immutable, uniquely-versioned release** =
+  a build + that deploy's config. It MUST NOT be mutated at run time; any change
+  is a **new release** with a new version.
+- There MUST be **no editing of code or config on a running instance**.
+- Dependencies MUST be **explicitly declared in a manifest and isolated**; the
+  app MUST NOT rely on system-wide packages leaking in from the host.
+
+## Stateless, share-nothing processes
+
+- A process MUST hold **no sticky local state needed across requests** — no
+  in-memory session store assumed to survive, no local-disk state relied on
+  between requests, no assumption a follow-up request reaches the same process.
+- Persistent and session state MUST live in a **stateful backing service**.
+- The app MUST scale **horizontally across share-nothing processes** and MAY
+  use distinct process types (web, worker, clock); it MUST NOT daemonize or
+  manage PID files itself.
+
+## Port binding
+
+- The app MUST be **self-contained and export its service by binding to a
+  port** it controls (ship its own server), with the port supplied by the
+  environment — not by being injected into a host webserver container.
+
+## Disposability: fast startup + graceful shutdown
+
+- A process MUST reach ready in **a few seconds** (no multi-minute startup on
+  the request path of scaling/deploy).
+- A process MUST **handle SIGTERM gracefully**: stop accepting new work, drain
+  in-flight work, then exit. Reviewer check: there is explicit SIGTERM/shutdown
+  handling, not a hard kill mid-request.
+- Worker jobs MUST be **reentrant / idempotent** and **returned to the queue**
+  (NACK / auto-requeue) on interruption, so a **sudden death** (crash, kill)
+  leaves no corruption or lost work.
+
+## Logs as event streams
+
+- Deployed services stream to **stdout by default** and MUST NOT manage their
+  own log files/rotation. CLI/MCP diagnostics use stderr when stdout carries
+  results/protocol. A supported platform-native OTLP route requires a recorded
+  design decision in the TD and bounded queue/flush/loss policy under `o11y-otel`.
+- The environment owns routing/retention. A local/CI runner may capture safe
+  streams into files and own rotation; this does not authorize file loggers in
+  deployed applications. Verify one canonical ingestion route without duplicate
+  records. Record structure/content remain `o11y-otel`'s practices.
+
+## Dev/prod parity
+
+- Dev, staging, and prod MUST use the **same type and version of each backing
+  service**. A lightweight local substitute that differs from production (e.g.
+  SQLite locally vs Postgres in prod, an in-memory queue vs the real broker) is
+  a parity gap and MUST be rejected.
+
+## Admin processes as one-off processes
+
+- Migrations, one-off scripts, and consoles MUST run as **one-off processes
+  against an identical release** — same codebase, config, and dependency
+  isolation as the long-running processes — not as ad-hoc commands on a
+  hand-configured box.
+
+## Stay in your lane (boundary with sibling concerns)
+
+See `concern.md` for the canonical Boundary (vs `deployment-topology`,
+`o11y-otel`, `k8s-kind` / the `deploy-target` filler). These practices are
+the per-process operational contract — defer to the neighbor named there for
+the deployable count and seams, the log/metric/trace schema, and the cluster
+/ Helm / image-build mechanics.
+
+## Artifact impact (what selecting this changes)
+
+- **Deployment checklist / runbook** — records the **config/secret surface**
+  (every config key the process reads), the **SIGTERM/graceful-shutdown
+  behavior** and drain timeout, and **how logs are collected** through the selected platform route, including
+  CLI/native-OTLP qualifications and any local/CI runner capture.
+- **Technical design** — records the **process model** (process types and how
+  each scales horizontally), the **config surface** (the full set of config keys, with owner and source),
+  and the **state strategy** (what lives in backing services vs nothing in the
+  process). It also states the **config + state + backing-services strategy**
+  (config and secrets from the environment, services as attached resources
+  addressed by config handles) and the immutable build/release/run and
+  disposability (SIGTERM, reentrant-jobs) contract.
+
+## Quality Gates
+
+- **No secret/config literal in the codebase** — all per-deploy config and every
+  credential come from ops-injected sources or dev-owned committed files by
+  owner; the open-source litmus test holds; no committed file holds a credential
+  or ops-owned handle.
+- **Backing services swappable by config alone** — every networked dependency is
+  an attached resource addressed by a config handle; no code branches on
+  local-vs-third-party; a swap is a config change with zero code change.
+- **Process holds no sticky local state needed across requests** — persistent
+  and session state live in a backing service; no in-memory session store, no
+  sticky sessions, no local-disk state assumed across requests; scaling is
+  horizontal across share-nothing processes.
+- **Releases are immutable and build/release/run is separated** — the running
+  artifact is a versioned build + config that is never mutated at run time; no
+  editing on a live instance; dependencies are declared and isolated.
+- **Fast startup + graceful SIGTERM shutdown + crash-safe jobs** — process ready
+  in seconds, SIGTERM drains in-flight work then exits, and worker jobs are
+  reentrant/idempotent and requeued on interruption.
+- **Logs use platform capture, not files the deployed app rotates** — default
+  service stdout, protocol-safe CLI/MCP stderr or an approved supported native
+  OTLP route. The environment (including a local/CI runner) owns capture/rotation;
+  receiver evidence verifies bounded behavior and no duplicate ingestion.
+- **Dev/prod parity on backing services** — dev, staging, and prod use the same
+  type and version of each backing service; no lightweight local substitute that
+  diverges from production.
+- **Admin tasks run as one-off processes on an identical release** — migrations
+  and scripts run in the same release as the app, not as ad-hoc commands on a
+  bespoke box.
+- **No lane bleed** — the contract is not conflated with the deployable count
+  (`deployment-topology`), the telemetry structure (`o11y-otel`), or the runtime
+  (`k8s-kind` / the `deploy-target` filler).

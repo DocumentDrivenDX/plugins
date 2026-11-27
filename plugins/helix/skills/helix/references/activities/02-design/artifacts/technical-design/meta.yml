@@ -1,0 +1,204 @@
+# Metadata for Technical Design (Story-Level)
+
+artifact:
+  name: Technical Design
+  id: technical-design
+  type: document
+  activity: design
+  level: story  # This is a story-level artifact
+
+voice: artifact-signal
+
+description: |
+  Story-specific technical design that details HOW to implement a single
+  user story within the context of the broader solution architecture.
+  This enables vertical slicing by providing implementation details for
+  one story at a time: changed components, files, interfaces, data model,
+  tests, migration/rollback, and implementation sequence.
+
+output:
+  location: docs/helix/02-design/technical-designs/TD-{id}-{name}.md
+  format: markdown
+  naming: TD-{story-number}-{story-name}.md
+  examples:
+    - TD-036-list-mcp-servers.md
+    - TD-037-install-mcp-server.md
+
+validation:
+  required_sections:
+    - technical_approach
+    - component_changes
+    - testing
+
+  quality_checks:
+    - check: umf_schema_basis_explicit
+      description: For new or changed schemas, structured interfaces, or domain models, identify inspected UMF definitions and pinned versions, reuse/composition or a specific justified exception, local additions, semantic/projection limits, authoritative source references and supported validation evidence; narrative-only work requires no model
+      severity: blocking
+    - check: formal_methods_scope_and_evidence
+      description: For selected formal-methods, semantic review checks slice applicability, chosen rigor, requirement-linked specification, assumptions/bounds, non-vacuity, reproducible evidence and code/test correspondence; unaffected slices record exclusion without analyzer/proof runs; model evidence never replaces implementation verification
+      severity: blocking
+
+    - check: diagnostic_wiring_references_contract
+      description: For applicable o11y-otel practices, local instrumentation and capture wiring reference Contracts and name privacy, correlation and receiver proof
+      severity: warning
+
+    - check: acceptance_criteria_realized
+      description: Each governing-story AC-ID (US-{n}-AC{m}) is realized by the technical changes; AC text is not restated here (ADR-009 — AC ownership lives in user-stories).
+      severity: blocking
+
+    - check: api_contracts_defined
+      description: Shared API, CLI, event, schema, config, telemetry, or adapter surface changes must reference an existing Contract or be preceded by a Contract update; TDs must not define full normative interface specifications inline
+      severity: blocking
+
+    - check: test_approach_specified
+      description: Testing strategy covers relevant unit, integration, API, and security scenarios
+      severity: warning
+
+    - check: security_considered
+      description: Security section addresses authentication, authorization, and data protection
+      severity: blocking
+
+    - check: rollback_plan_exists
+      description: Migration and rollback strategies are documented
+      severity: warning
+
+    - check: review_technical_approach_inherits_parent_solution
+      description: >-
+        Technical approach inherits from the parent solution design — no contradictions
+      severity: warning
+    - check: review_key_decisions_have_documented_rationale
+      description: >-
+        Key decisions have documented rationale
+      severity: warning
+    - check: review_trade_offs_explicit_what_we
+      description: >-
+        Trade-offs are explicit — what we gain and what we lose
+      severity: warning
+    - check: review_component_changes_clearly_describe_current
+      description: >-
+        Component changes clearly describe current state vs. changes
+      severity: warning
+    - check: review_data_model_changes_include_migration
+      description: >-
+        Data model changes include migration SQL
+      severity: warning
+    - check: review_integration_points_specify_fallback_behavior
+      description: >-
+        Integration points specify fallback behavior for external dependencies
+      severity: warning
+    - check: review_performance_targets_numeric_specific_metrics
+      description: >-
+        Performance targets are numeric with specific metrics
+      severity: warning
+    - check: review_implementation_sequence_ordered_file_paths
+      description: >-
+        Implementation sequence is ordered with file paths and test paths
+      severity: warning
+    - check: review_design_consistent_governing_solution_design
+      description: >-
+        Design is consistent with governing solution design and feature spec
+      severity: warning
+
+  pattern_checks:
+    - pattern: "\\[\\[US-\\d{3}[-\\]]"
+      expected: ">=1"
+      message: Must wiki-link the governing user story ([[US-nnn]] or [[US-nnn-slug]])
+
+    - pattern: "\\[\\[SD-\\d{3}[-\\]]"
+      expected: ">=1"
+      message: Must wiki-link the parent solution design ([[SD-nnn]] or [[SD-nnn-slug]])
+
+    - pattern: "US-\\d{3}-AC\\d+"
+      expected: ">=1"
+      message: Must reference at least one governing story AC-ID (US-{n}-AC{m}); do not restate AC text (ADR-009)
+
+cross_references:
+  must_reference:
+    - User Story (US-XXX)
+    - Solution Design (SD-XXX)
+
+  may_reference:
+    - Feature Specification (FEAT-XXX)
+    - Contracts (CONTRACT-XXX or API-XXX)
+    - Data Models
+    - Other Technical Designs (TD-XXX)
+
+variables:
+  - name: story_id
+    description: User story ID (e.g., 036)
+    required: true
+
+  - name: story_name
+    description: User story descriptive name
+    required: true
+
+  - name: feature_id
+    description: Parent feature ID
+    required: true
+
+prompts:
+  generation: prompt.md
+  review: |
+    Review this technical design for:
+    1. Completeness of acceptance criteria mapping
+    2. Clarity of technical approach
+    3. Specificity of implementation details
+    4. Adequacy of test approach
+    5. Security considerations
+    6. Rollback capability
+
+template:
+  file: template.md
+  sections:
+    - technical_approach: "How to implement"
+    - component_changes: "What needs to be modified"
+    - api_design: "Story-level interface usage and Contract references"
+    - data_model: "Schema changes"
+    - testing: "How to verify; reference governing-story AC-IDs (US-{n}-AC{m})"
+
+example:
+  file: example.md
+
+references:
+  - title: "Google Engineering Practices: Small CLs"
+    file: docs/resources/google-small-cls.md
+    relationship: "Grounds bounded story-level implementation slices with tests and rollback"
+  - title: "Cucumber Executable Specifications"
+    file: docs/resources/cucumber-executable-specifications.md
+    relationship: "Grounds acceptance-criteria-to-test mapping"
+
+workflow:
+  creation_order: 1  # First artifact in design activity for a story
+  review_cycles: 1-2
+
+relationships:
+  informed_by:
+    - user-stories
+    - solution-design
+    - feature-specification
+
+  informs:
+    - test-plan
+    - implementation-plan
+
+  references:
+    - architecture
+
+story_progression:
+  previous: US-XXX (Frame)
+  current: TD-XXX (Design)
+  next: TP-XXX (Test)
+
+tags:
+  - story-level
+  - vertical-slice
+  - technical-design
+  - implementation
+
+version: 1.0.0
+last_updated: 2024-01-19
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: sequence, form: lifelines, question: "What happens, step by step, in the designed interaction?", source: "the design's interaction section"}
+  - {kind: state, form: machine, question: "What states can the designed component be in?", source: "the design's state section"}

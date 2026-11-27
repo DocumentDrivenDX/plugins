@@ -1,0 +1,108 @@
+artifact:
+  name: Contract
+  id: contract
+  type: document
+  activity: design
+  level: interface
+
+voice: artifact-signal
+
+description: |
+  Normative interface and schema contract that another team can implement
+  against directly, including API, CLI, protocol, event, and data contracts.
+  Contracts own exact fields, commands, payloads, compatibility rules, examples,
+  and error semantics; they do not own product scope or internal implementation
+  design.
+
+output:
+  location: docs/helix/02-design/contracts/CONTRACT-{id}-{name}.md
+  format: markdown
+  naming: CONTRACT-{number}-{name}.md
+  note: "API-{number}-{name}.md remains allowed for API-specific subtypes"
+
+validation:
+  required_sections:
+    - purpose
+    - scope_and_boundaries
+    - normative_surface
+    - precedence_and_compatibility
+    - error_semantics
+    - examples
+
+  quality_checks:
+    - check: umf_schema_basis_explicit
+      description: For new or changed schemas, structured interfaces, or domain models, identify inspected UMF definitions and pinned versions, reuse/composition or a specific justified exception, local additions, semantic/projection limits, authoritative source references and supported validation evidence; narrative-only work requires no model
+      severity: blocking
+    - check: telemetry_mapping_and_query_defined
+      description: For diagnostic Contracts, define adopted OTel versions, exact mapping, conditional context, capture and query bounds, authorization, ordering, continuation, loss and compatibility
+      severity: warning
+
+    - check: normative_surface_explicit
+      description: Normative fields and rules for commands, messages, or payloads are explicit
+      severity: blocking
+    - check: implementation_independent
+      description: Another team should be able to implement against the contract without code-level coupling
+      severity: blocking
+    - check: error_semantics_defined
+      description: Failure modes and recovery expectations must be specified
+      severity: blocking
+    - check: examples_present
+      description: At least one concrete example should illustrate the contract
+      severity: warning
+
+
+    - check: compatibility_and_precedence
+      description: Compatibility rules and precedence between contract sources are explicit
+      severity: blocking
+    - check: executable_test_derivable
+      description: A concrete contract test can be derived from the normative surface
+      severity: warning
+    - check: non_normative_notes_separated
+      description: Explanatory notes cannot be mistaken for normative requirements
+      severity: blocking
+
+prompts:
+  generation: prompt.md
+
+template:
+  file: template.md
+
+example:
+  file: example.md
+
+references:
+  - title: "OpenAPI Specification"
+    file: docs/resources/openapi-specification.md
+    relationship: "Grounds exact API surface, schemas, responses, examples, and validation"
+  - title: "RFC 9457 Problem Details for HTTP APIs"
+    file: docs/resources/rfc-9457-problem-details.md
+    relationship: "Grounds structured HTTP error semantics and recovery guidance"
+
+workflow:
+  creation_order: 2
+  review_cycles: 1-2
+
+relationships:
+  informed_by:
+    - feature-specification
+    - architecture
+    - solution-design
+    - adr
+  informs:
+    - test-plan
+    - technical-design
+    - test-suites
+    - implementation-plan
+
+tags:
+  - design
+  - contract
+  - interface
+  - schema
+
+version: 1.0.0
+last_updated: 2026-04-09
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: sequence, form: lifelines, question: "What exchange does the contract define, in order?", source: "the contract's operations"}

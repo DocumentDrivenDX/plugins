@@ -1,0 +1,113 @@
+artifact:
+  name: Implementation Plan
+  id: implementation-plan
+  type: document
+  activity: build
+
+voice: artifact-signal
+
+description: |
+  Build-activity plan that decomposes governing design into implementation slices,
+  sequencing, ownership, validation gates, and evidence expectations. It turns
+  story, design, and test artifacts into execution-ready build work without
+  reopening product or design decisions.
+
+output:
+  location: docs/helix/04-build/implementation-plan.md
+  format: markdown
+  naming: implementation-plan.md
+
+validation:
+  required_sections:
+    - scope
+    - implementation_slices
+    - execution_contract
+    - continuation_evidence
+    - exit_criteria
+    - validation_plan
+    - risks_and_rollbacks
+
+  quality_checks:
+    - check: diagnostic_evidence_sequenced
+      description: For applicable o11y-otel practices, sequence Contracts, capture and real receiver proof before the diagnostic pilot, with safe evidence references and capture limits
+      severity: warning
+
+    - check: slices_bounded
+      description: Implementation slices have bounded scope and are reviewable; separate work items are optional
+      severity: blocking
+    - check: validation_attached
+      description: Each slice should name the validation or evidence required for completion
+      severity: blocking
+
+    - check: review_governing_artifacts_are_listed_and_01
+      description: >-
+        Governing artifacts are listed and exist on disk
+      severity: warning
+    - check: review_shared_constraints_trace_back_requirements
+      description: >-
+        Shared constraints trace back to requirements, design, or architecture
+      severity: warning
+    - check: review_build_sequence_has_justified_ordering
+      description: >-
+        Build sequence has a justified ordering — not just arbitrary
+      severity: warning
+    - check: review_dependencies_between_build_steps_explicit
+      description: >-
+        Dependencies between build steps are explicit
+      severity: warning
+    - check: review_story_area_references_its_governing
+      description: >-
+        Each story/area references its governing artifacts (TP, TD)
+      severity: warning
+    - check: review_issue_decomposition_follows_tracker_conventions
+      description: >-
+        When tracking is explicitly selected, work items follow the selected runtime conventions
+      severity: warning
+    - check: review_quality_gates_specific_enforceable_not
+      description: >-
+        Quality gates are specific and enforceable, not aspirational
+      severity: warning
+    - check: review_risks_have_concrete_responses_we
+      description: >-
+        Risks have concrete responses ("we do X"), not vague strategies
+      severity: warning
+    - check: review_plan_consistent_governing_test_plan
+      description: >-
+        Plan is consistent with governing test plan and technical designs
+      severity: warning
+
+prompts:
+  generation: prompt.md
+
+template:
+  file: template.md
+
+example:
+  file: example.md
+
+references:
+  - title: "Google Engineering Practices: Small CLs"
+    file: docs/resources/google-small-cls.md
+    relationship: "Grounds small, reviewable, rollback-friendly implementation slices with related tests"
+
+relationships:
+  informed_by:
+    - prd
+    - solution-design
+    - technical-design
+    - test-plan
+    - story-test-plan
+  informs:
+    - release-notes
+    - deployment-checklist
+
+tags:
+  - build
+  - implementation
+  - planning
+
+version: 1.0.0
+
+# The visuals this type usually draws, each only when it earns its place (references/visuals.md).
+visuals:
+  - {kind: timeline, form: roadmap, question: "What runs alongside what, and when?", source: "the plan's phases and work items"}

@@ -1,0 +1,139 @@
+# Concern: Verification
+
+## Category
+quality-attribute
+
+## Areas
+all
+
+## Boundary
+
+This concern is the **evidence gate**, not a second test strategy. Three
+distinct concerns own three distinct things, and `verification` must not
+duplicate the other two:
+
+- **`testing`** owns *test strategy and discipline* — what to test, at which
+  layer, with stubs over mocks and fakers over fixtures, and the
+  always-pass/trace-to-AC rules.
+- **`e2e-framework`** (the slot, default `e2e-playwright`) owns the *end-to-end
+  tooling* — the browser runner, config, video/trace artifacts, and the
+  run-core-flow gate.
+- **`verification`** requires observed evidence for the scoped outcome at the
+  layer selected by `testing`. Changed runtime boundaries need real-path proof;
+  internal changes may already have sufficient unit or regression coverage.
+  It does not require another test layer or re-specify which tool to use.
+
+## Components
+
+- **Re-review before done**: an adversarial second pass against the acceptance
+  criteria and integration risks — not a self-affirming "looks good to me".
+- **Runtime-boundary exercise**: changed user flows and integrations need
+  real-path proof; unit tests cannot establish a client handshake or deployment
+  claim. Unchanged boundaries do not create a new test campaign.
+- **Requirement-linked results**: existing mappings and test-source citations
+  connect criteria to observed run reports. Supplemental observations cover
+  proof gaps outside the normal reporting path; no extra file is mandatory.
+- **Verify-don't-trust**: never report a result that was not observed.
+
+## Constraints
+
+### Not done until observed evidence exists
+
+- "Done" requires observed evidence sufficient for the scoped behavior and
+  material risks. Use existing tests where sufficient; do not require every
+  layer for every criterion or a new matrix for mechanical changes.
+- Before claiming completion, an agent must produce the evidence artifacts in
+  `practices.md`: the command run + its exit status, the target URL/env, and the
+  affected flows exercised, including material failure branches. Existing reports
+  carry these facts and the tested revision; link them from the existing mapping
+  or acceptance record. A cited test alone is not proof it ran and passed.
+- If the change affects an integration with a named consumer in another repo,
+  "done" requires evidence that the consumer pulled the change and its integration was
+  exercised. Local gate-green alone is not enough.
+- This catches **locally-correct / globally-wrong** work: components that pass
+  in isolation but fail when composed into the running system.
+
+### Verify, don't trust (extends testing's always-pass and measure's M4)
+
+- Never assert a result you did not observe. A "complete", a "200 OK", a
+  "tests pass", or a coverage figure must come from an actual run you watched
+  finish, not from expectation. This extends the measure action's
+  verify-don't-trust rule (it re-runs gates itself rather than accepting a
+  self-reported "complete") from the metric layer to the completion claim.
+- An autonomous pass can report success and still have died mid-run. Treat a
+  self-reported "done" as a hypothesis to verify, never as evidence.
+
+### Re-review is adversarial, not confirmatory
+
+- The re-review pass actively looks for the ways the change is wrong:
+  unhandled error paths, untouched integration seams, ACs that the
+  implementation skirts rather than satisfies.
+- Re-review happens against the governing acceptance criteria and the
+  integration risks the change touches — not against the author's own mental
+  model of "what I meant to build".
+
+## Exceptions (honored in concern-resolution and at the gate)
+
+Use the appropriate existing proof for the scoped work. Internal refinements
+need no exception record merely because unit or regression checks suffice.
+For a required boundary exercise that is infeasible, record the reason and
+substitute proof in the existing acceptance record:
+
+- **Library / docs-only / non-buildable work** — there is no running stack to
+  exercise. The evidence is the layer that *does* exist: the library's tests
+  run green (with their command + exit status recorded), or the docs build /
+  link-check passes. Full-stack e2e is not required and its absence is not a
+  gap.
+- **Products where full-stack e2e is genuinely infeasible** — e.g. the system
+  depends on an external service that cannot be stood up locally, or hardware
+  that cannot be emulated. Record the specific reason, and substitute the
+  strongest observable evidence available (integration against a stub of the
+  boundary, a recorded manual run). An unrecorded "e2e is hard" is not an
+  exception — the reason must be written down.
+
+A recorded exception relaxes *which* evidence is required, never the
+verify-don't-trust rule: even under an exception, no result is asserted that
+was not observed.
+
+## Drift Signals (anti-patterns to reject in review)
+
+- A changed runtime boundary claimed verified only by unit tests → exercise
+  that boundary with its real client and record the observed result
+- A reported result (status code, flow outcome, metric) with no recorded run
+  behind it → verify-don't-trust violation; re-run and observe
+- A self-review that only confirms the author's intent → replace with an
+  adversarial re-review against ACs + integration risks
+- "e2e is infeasible" with no recorded reason → record the reason or produce
+  the evidence
+- A new integration passes in isolation but never ran through its real entry
+  point → exercise the integration before claiming it works
+- An agent/network-facing surface (MCP server, OAuth/SSO login, a remote
+  endpoint) declared done on unit tests, with no real client ever completing the
+  handshake/login against the real address → not done; the runtime boundary is
+  exactly where unit-green hides the defect (the connection, the token exchange,
+  the cert, localhost-vs-real-host). Drive a real client end-to-end before "done".
+- An affected downstream integration declared done on local gate-green
+  alone, with no observed downstream-consumer evidence → not done; the consumer
+  must pull the change and exercise the integration.
+
+## When to use
+
+Every **buildable** product, regardless of language, framework, or domain.
+High autonomy auto-selects this concern for buildable products (see
+`workflows/references/concern-resolution.md`), honoring the
+exceptions above. Compose with `testing` (strategy) and the `e2e-framework`
+slot (tooling); `verification` adds the evidence gate on top — it does not
+replace either.
+
+## Artifact Impact
+
+Apply these responsibilities in relevant existing artifacts or the acceptance
+record. Concern selection alone does not require a new process document:
+- STORY_TEST_PLAN: existing AC/test mapping and citations link to observed run
+  results; Notes/Executable Proof link supplemental observations only for proof
+  gaps. Other requirement types use their existing acceptance records.
+- TEST_PLAN: the layer allocation only
+- IMPLEMENTATION_PLAN: scoped validation commands, run-result references and
+  reviewed exceptions; no shared evidence file or duplicate mapping.
+
+## ADR References
