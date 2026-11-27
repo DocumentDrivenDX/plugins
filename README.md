@@ -2,11 +2,11 @@
 
 The Claude plugin marketplace for [DocumentDrivenDX](https://github.com/DocumentDrivenDX).
 
-In Claude Code:
+With Claude Code:
 
-```
-/plugin marketplace add DocumentDrivenDX/plugins
-/plugin install stemma@documentdrivendx
+```sh
+claude plugin marketplace add DocumentDrivenDX/plugins
+claude plugin install stemma@documentdrivendx
 ```
 
 | Plugin | What it does | Source |
