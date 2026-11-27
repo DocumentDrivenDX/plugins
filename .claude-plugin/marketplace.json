@@ -10,6 +10,11 @@
       "name": "stemma",
       "description": "Create academically rigorous research reports and books. Research and write with Claude while scripts check your citations against your own stored copies and explain what they find.",
       "source": "./plugins/stemma"
+    },
+    {
+      "name": "docsync",
+      "description": "Edit a Markdown file from your repository in a Claude Doc, with others, and sync the changes both ways without overwriting either.",
+      "source": "./plugins/docsync"
     }
   ]
 }
