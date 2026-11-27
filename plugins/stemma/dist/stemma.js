@@ -101127,7 +101127,7 @@ var init_pdf_worker = __esm(() => {
 
 // packages/cli/src/main.ts
 import { existsSync as existsSync3, readFileSync as readFileSync4 } from "fs";
-import { join as join4, resolve as resolve5 } from "path";
+import { join as join4, resolve as resolve6 } from "path";
 import { parseArgs } from "util";
 
 // packages/records/src/json.ts
@@ -102226,6 +102226,16 @@ var TYPES = {
       type: "string",
       many: true
     },
+    tags: {
+      type: "string",
+      many: true
+    },
+    changes: {
+      type: {
+        value: "SourceChange"
+      },
+      many: true
+    },
     type: {
       type: "string"
     },
@@ -102312,6 +102322,41 @@ var TYPES = {
       ]
     },
     as_found: {
+      type: "string"
+    }
+  },
+  SourceChange: {
+    at: {
+      type: "date-time",
+      required: true
+    },
+    by: {
+      type: {
+        value: "Actor"
+      },
+      required: true
+    },
+    action: {
+      type: "string",
+      required: true,
+      values: [
+        "added",
+        "replaced",
+        "removed"
+      ]
+    },
+    field: {
+      type: "string",
+      required: true
+    },
+    value: {
+      type: "string",
+      required: true
+    },
+    previous: {
+      type: "string"
+    },
+    from: {
       type: "string"
     }
   },
@@ -108953,7 +108998,7 @@ function againstCopy(record, view) {
   }
   if (record.authors.length > 0) {
     const byIdentity = stated.authors.length === 0 ? undefined : namesWithin(record, stated.authors);
-    judge("authors", record.authors.join("; "), byIdentity, record.authors.every((a) => holds(pages.text, foldName(a))), stated.authors.join("; "));
+    judge("authors", record.authors.join("; "), byIdentity, record.authors.every((a) => holds(pages.text, foldName(a))), stated.authors.join("; ") || undefined);
   }
   if (record.year) {
     const plain = holds(pages.text, record.year) || holds(pages.text, toRoman(Number(record.year)));
@@ -109994,6 +110039,31 @@ function citationFromPassage(corpus, record) {
 
 // packages/core/src/checks/changed.ts
 var sourceBinding = (source) => digest(Object.fromEntries(SOURCE_BINDING_FIELDS.flatMap((f) => source[f] === undefined ? [] : [[f, source[f]]])));
+function without(source, field, value) {
+  const key = field.startsWith("bib.") ? "bib" : field === "authors" ? "contributions" : field;
+  const out = { ...source };
+  const keep = field === "identifiers" ? (e) => `${String(e.scheme)}:${String(e.value)}` !== value : field === "authors" ? (e) => e.role !== "author" : field.startsWith("bib.") ? (e) => `bib.${String(e.name)}` !== field : undefined;
+  const left = keep && Array.isArray(out[key]) ? out[key].filter(keep) : [];
+  if (left.length > 0)
+    out[key] = left;
+  else
+    delete out[key];
+  return out;
+}
+function onlyAdded(source, bound) {
+  let state = source;
+  for (const change of (Array.isArray(source.changes) ? source.changes.filter(isObject) : []).reverse()) {
+    const field = String(change.field);
+    if (!field.startsWith("bib.") && field !== "authors" && !SOURCE_BINDING_FIELDS.includes(field))
+      continue;
+    if (change.action !== "added")
+      return false;
+    state = without(state, field, String(change.value));
+    if (sourceBinding(state) === bound)
+      return true;
+  }
+  return false;
+}
 var list3 = (value) => value === undefined ? [] : [value].flat().map(String);
 function walker(corpus) {
   const texts = new SourceTexts(corpus);
@@ -110027,7 +110097,7 @@ function walker(corpus) {
         walk.unread = true;
       next([...list3(data.text), ...list3(data.source)]);
       const source = corpus.byId.get(String(data.source));
-      if (source?.data?.kind === "source" && typeof data.source_record_sha256 === "string" && data.source_record_sha256 !== sourceBinding(source.data)) {
+      if (source?.data?.kind === "source" && typeof data.source_record_sha256 === "string" && data.source_record_sha256 !== sourceBinding(source.data) && !onlyAdded(source.data, data.source_record_sha256)) {
         walk.changes.push({ reason: "source_details_changed", record: source, what: `source details changed since passage ${id} was anchored`, through: [...through, id] });
       }
     }
@@ -111117,6 +111187,379 @@ function researchIndex(corpus) {
       return { ...note, problem: "title_withheld" };
     return { ...note, title: Array.from(title).slice(0, TITLE_LIMIT).join("") };
   });
+}
+// packages/core/src/enrich.ts
+var list4 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+var strings2 = (value) => Array.isArray(value) ? value.filter((v) => typeof v === "string") : [];
+var str = (value) => typeof value === "string" && value !== "" ? value : undefined;
+var time2 = (now) => now.toISOString().replace(/\.\d+Z$/, "Z");
+var active2 = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+function findSource(corpus, name) {
+  const sources = corpus.records.filter((f) => f.state === "ok" && f.data?.kind === "source");
+  const byId = sources.find((f) => idOf(f) === name);
+  const found = byId ? [byId] : sources.filter((f) => !isRetired(f.data) && citationKeys(f.data).includes(name));
+  if (found.length !== 1)
+    throw new InvalidInput(`${found.length === 0 ? "No readable source record has" : "More than one source record has"} the ID or citation key ${name}.`);
+  return found[0];
+}
+function changeable(corpus, name) {
+  const file = findSource(corpus, name);
+  if (isRetired(file.data))
+    throw new InvalidInput(`The source ${name} is retired.`);
+  return file;
+}
+function rewrite(file, data, pending, actor, now) {
+  if (pending.length === 0)
+    return;
+  const at = time2(now);
+  const log = pending.map((c) => ({ at, by: { ...actor }, ...c }));
+  const text = canonical({ ...data, changes: [...list4(data.changes), ...log], changed: { at, by: { ...actor } } });
+  assertValid("Source", "source", text);
+  return { id: idOf(file), path: file.path, text };
+}
+var TAG = /^(?:[\p{Ll}\p{Lo}\p{N}][\p{Ll}\p{Lo}\p{M}\p{N}._-]*:)?[\p{Ll}\p{Lo}\p{N}][\p{Ll}\p{Lo}\p{M}\p{N}._-]*$/u;
+function parseTag(tag) {
+  if (tag.length > 80 || !TAG.test(tag)) {
+    throw new InvalidInput(`"${tag}" is not a tag. A tag is lowercase letters, digits, "-", "_" or ".", with an optional namespace before one colon, such as "boring" or "position:subsidence".`);
+  }
+  return tag;
+}
+var tagMatches = (tags, wanted) => {
+  const space = /^(.+:)\*?$/.exec(wanted)?.[1];
+  return space ? tags.some((t) => t.startsWith(space)) : tags.includes(wanted);
+};
+function planTags(corpus, request) {
+  const file = changeable(corpus, request.source);
+  const data = file.data;
+  const add = request.add.map(parseTag);
+  const remove = request.remove.map(parseTag);
+  const both = add.find((t) => remove.includes(t));
+  if (both)
+    throw new InvalidInput(`${both} is both added and removed.`);
+  const had = strings2(data.tags);
+  const added = [...new Set(add)].filter((t) => !had.includes(t));
+  const removed = [...new Set(remove)].filter((t) => had.includes(t));
+  const tags = [...had.filter((t) => !removed.includes(t)), ...added].sort();
+  const from = request.from ? { from: request.from } : {};
+  const pending = [
+    ...added.map((value) => ({ action: "added", field: "tags", value, ...from })),
+    ...removed.map((value) => ({ action: "removed", field: "tags", value, ...from }))
+  ];
+  const { tags: _old, ...rest } = data;
+  const record = rewrite(file, tags.length > 0 ? { ...rest, tags } : rest, pending, request.actor, request.now);
+  return { source: idOf(file), tags, added, removed, record };
+}
+var PLAIN_FIELDS = ["title", "type", "subtype", "issued", "citation_key", "locator_label"];
+var BIB_FIELDS = [
+  "publisher",
+  "publisher-place",
+  "container-title",
+  "collection-title",
+  "collection-number",
+  "volume",
+  "number-of-volumes",
+  "issue",
+  "edition",
+  "page",
+  "number",
+  "language",
+  "abstract",
+  "URL"
+];
+var nameText = (n) => n.literal ?? [n.family, n.given].filter(Boolean).join(", ");
+function parseName(value) {
+  const comma = value.indexOf(",");
+  const [family, given] = comma < 0 ? ["", ""] : [value.slice(0, comma).trim(), value.slice(comma + 1).trim()];
+  if (family && given)
+    return { family, given };
+  if (!value.trim())
+    throw new InvalidInput("An author name is empty.");
+  return { literal: value.trim() };
+}
+var authorsOf = (data) => list4(data.contributions).filter((c) => c.role === "author").map((c) => isObject(c.as_printed) ? c.as_printed : {});
+var authorsText = (names) => names.map(nameText).join("; ");
+function recordedValue(data, field) {
+  if (field === "title")
+    return isObject(data.title) ? str(data.title.value) : undefined;
+  if (field === "issued")
+    return isObject(data.issued) ? str(data.issued.edtf) ?? str(data.issued.literal) ?? str(data.issued.as_printed) : undefined;
+  if (PLAIN_FIELDS.includes(field))
+    return str(data[field]);
+  const found = list4(data.bib).find((b) => `bib.${String(b.name)}` === field || b.name === field);
+  return found && isObject(found.value) ? str(found.value.value) : undefined;
+}
+function put(data, field, value) {
+  if (field === "title")
+    return { ...data, title: { ...isObject(data.title) ? data.title : {}, value } };
+  if (field === "issued")
+    return { ...data, issued: { edtf: value } };
+  if (PLAIN_FIELDS.includes(field))
+    return { ...data, [field]: value };
+  const bib = list4(data.bib);
+  const at = bib.findIndex((b) => b.name === field);
+  const entry = { name: field, value: { value } };
+  return { ...data, bib: at < 0 ? [...bib, entry] : bib.map((b, i) => i === at ? entry : b) };
+}
+function putAuthors(data, names) {
+  const others = list4(data.contributions).filter((c) => c.role !== "author");
+  const used = new Set(others.map((c) => String(c.lid)));
+  let n = 0;
+  const lid = () => {
+    do
+      n++;
+    while (used.has(`a${n}`));
+    return `a${n}`;
+  };
+  return { ...data, contributions: [...names.map((name) => ({ lid: lid(), role: "author", as_printed: { ...name } })), ...others] };
+}
+var logName = (field) => PLAIN_FIELDS.includes(field) || field === "authors" ? field : `bib.${field}`;
+function lookupNames(resolution) {
+  let response;
+  try {
+    response = JSON.parse(String(resolution.response ?? ""));
+  } catch {
+    return [];
+  }
+  if (!isObject(response))
+    return [];
+  if (resolution.resolver === "crossref") {
+    return list4(response.author).flatMap((p) => {
+      const [family, given, name] = [str(p.family), str(p.given), str(p.name)];
+      return family ? [{ family, ...given ? { given } : {} }] : name ? [{ literal: name }] : [];
+    });
+  }
+  return [response.creator].flat().flatMap((c) => {
+    if (typeof c !== "string" || !c.trim())
+      return [];
+    const [family, given, ...rest] = c.replace(/,\s*\d{3,4}\??-(\d{3,4}\??)?\.?$/, "").split(",").map((s) => s.trim());
+    return family && given && rest.length === 0 ? [{ family, given }] : [{ literal: c.trim() }];
+  });
+}
+function planEnrich(corpus, request) {
+  const file = changeable(corpus, request.source);
+  const source = idOf(file);
+  const added = [];
+  const replaced = [];
+  const same = [];
+  const disagreements = [];
+  const notes = [];
+  const pending = [];
+  let data = file.data;
+  let from = request.from;
+  const resolution = request.lookup === undefined ? undefined : active2(corpus, "resolution").find((r) => idOf(r) === request.lookup)?.data;
+  if (request.lookup !== undefined) {
+    if (!resolution || resolution.source !== source)
+      throw new InvalidInput(`${request.lookup} is not a saved lookup of this source.`);
+    if (resolution.outcome !== "found" || !isObject(resolution.found))
+      throw new InvalidInput(`The lookup ${request.lookup} did not find the work, so it gives no values.`);
+    if (request.replace || request.identifiers.length + request.details.length + request.authors.length > 0) {
+      throw new InvalidInput("A lookup only fills what is not recorded. To take one of its values in place of a recorded one, give that value with --set or --author, and --replace.");
+    }
+    const identifier = isObject(resolution.identifier) ? resolution.identifier : {};
+    from ??= `${request.lookup} (${String(resolution.resolver)} record of ${String(identifier.scheme)}:${String(identifier.value)}, looked up ${String(resolution.queried_at).slice(0, 10)})`;
+  } else if (!from)
+    throw new InvalidInput('Say where these details come from with --from, such as "title page", "library catalogue" or "the author".');
+  const take = (field, value, apply, previous, agrees) => {
+    if (previous === undefined) {
+      data = apply();
+      added.push({ field, value });
+      pending.push({ action: "added", field: logName(field), value, from });
+    } else if (agrees)
+      same.push(field);
+    else if (request.replace) {
+      data = apply();
+      replaced.push({ field, value, previous });
+      pending.push({ action: "replaced", field: logName(field), value, previous, from });
+    } else
+      disagreements.push({ field, recorded: previous, offered: value });
+  };
+  const detail = (field, value) => {
+    const previous = recordedValue(data, field);
+    take(field, value, () => put(data, field, value), previous, previous === value);
+  };
+  const authors = (names, agrees) => {
+    const before = authorsOf(data);
+    const previous = before.length > 0 ? authorsText(before) : undefined;
+    take("authors", authorsText(names), () => putAuthors(data, names), previous, agrees ?? (previous !== undefined && foldName(previous) === foldName(authorsText(names))));
+  };
+  for (const { field, value } of request.identifiers) {
+    const scheme = field.toLowerCase();
+    const held = list4(data.identifiers).filter((i) => String(i.scheme).toLowerCase() === scheme);
+    const shown = `${scheme}:${value}`;
+    if (held.some((i) => String(i.value).toLowerCase() === value.toLowerCase()))
+      same.push(shown);
+    else if (held.length > 0 && (scheme === "doi" || scheme === "ia") && !request.replace) {
+      disagreements.push({ field: `identifier ${scheme}`, recorded: held.map((i) => String(i.value)).join(", "), offered: value });
+    } else {
+      const swap = request.replace && (scheme === "doi" || scheme === "ia") && held.length > 0;
+      const previous = held.map((i) => `${scheme}:${String(i.value)}`).join(", ");
+      data = { ...data, identifiers: [...list4(data.identifiers).filter((i) => !swap || !held.includes(i)), { scheme, value }] };
+      if (swap)
+        replaced.push({ field: "identifiers", value: shown, previous });
+      else
+        added.push({ field: "identifiers", value: shown });
+      pending.push({ action: swap ? "replaced" : "added", field: "identifiers", value: shown, ...swap ? { previous } : {}, from });
+    }
+  }
+  for (const { field, value } of request.details) {
+    if (!PLAIN_FIELDS.includes(field) && !BIB_FIELDS.includes(field)) {
+      throw new InvalidInput(`${field} is not a detail this command sets. Use one of ${[...PLAIN_FIELDS, ...BIB_FIELDS].join(", ")}, or --author.`);
+    }
+    if (!value.trim())
+      throw new InvalidInput(`${field} has no value.`);
+    if (field === "citation_key" && corpus.records.some((f) => f !== file && f.data?.kind === "source" && !isRetired(f.data) && citationKeys(f.data).includes(value))) {
+      throw new InvalidInput(`Another source already has the citation key ${value}.`);
+    }
+    detail(field, value);
+  }
+  if (request.authors.length > 0)
+    authors(request.authors.map(parseName));
+  if (resolution) {
+    const found = resolution.found;
+    const record = describe(data);
+    const said = compareLookup(record, resolution);
+    const verdict = (field) => said.find((s) => s.field === field);
+    const compared = (field, name, offered) => {
+      const judged = verdict(name);
+      if (offered === undefined)
+        return;
+      if (recordedValue(data, field) === undefined)
+        detail(field, offered);
+      else if (judged?.verdict === "differs")
+        disagreements.push({ field, recorded: recordedValue(data, field), offered: judged.theirs });
+      else if (judged?.verdict === "agrees")
+        same.push(field);
+      else
+        notes.push(`${field}: recorded as ${recordedValue(data, field)}; the lookup (${offered}) was not enough to compare it`);
+    };
+    compared("title", "title", str(found.title));
+    const names = lookupNames(resolution);
+    if (names.length > 0) {
+      const judged = verdict("authors");
+      if (authorsOf(data).length === 0)
+        authors(names);
+      else
+        authors(names, judged?.verdict === "agrees");
+    }
+    const issued = str(found.issued)?.match(/^\d{4}(-\d\d(-\d\d)?)?/)?.[0];
+    const volume = typeof resolution.response === "string" && /"volume"\s*:/.test(resolution.response) && resolution.resolver === "internet_archive";
+    if (issued && recordedValue(data, "issued") === undefined && volume) {
+      notes.push(`issued: not taken. The lookup is of one volume of a set and gives ${issued}, which may date the set. Give the year with --set issued=<year> from the copy.`);
+    } else
+      compared("issued", "year", issued);
+    for (const [field, key] of [["publisher", "publisher"], ["container-title", "venue"]]) {
+      const offered = str(found[key]);
+      const previous = recordedValue(data, field);
+      if (offered !== undefined)
+        take(field, offered, () => put(data, field, offered), previous, previous !== undefined && foldName(previous) === foldName(offered));
+    }
+  }
+  return { source, added, replaced, same, disagreements, notes, from, record: rewrite(file, data, pending, request.actor, request.now) };
+}
+function holdersOf(corpus, sha256) {
+  const upstreams = active2(corpus, "upstream").filter((u) => u.data.sha256 === sha256).map((u) => String(u.data.source));
+  const texts = [...corpus.texts.values()].map((t) => t.manifest.data).filter((d) => !isRetired(d) && isObject(d.original) && list4(d.original.files).some((f) => f.sha256 === sha256)).map((d) => String(d.source));
+  return [...new Set([...upstreams, ...texts])].sort();
+}
+var upstreamOf = (corpus, source, sha256) => active2(corpus, "upstream").find((u) => u.data.source === source && u.data.sha256 === sha256)?.data;
+function planCapture(corpus, request) {
+  const named = request.source === undefined ? undefined : idOf(changeable(corpus, request.source));
+  const { sha256, size, media_type } = request.original;
+  const holders = holdersOf(corpus, sha256);
+  const existing = named !== undefined ? upstreamOf(corpus, named, sha256) ? named : undefined : holders[0];
+  if (existing !== undefined)
+    return { source: existing, new_source: false, records: [] };
+  const created = { at: time2(request.now), by: { ...request.actor } };
+  const source = named ?? `${KINDS.source.prefix}${request.token()}`;
+  const records = [];
+  const make = (kind, schema, data) => {
+    const text = canonical(data);
+    assertValid(schema, kind, text);
+    records.push({ id: String(data.id), path: recordPath(kind, String(data.id)), text });
+  };
+  if (!named)
+    make("source", "Source", { schema: RECORD_SCHEMA, id: source, kind: "source", created, admission: "candidate", intake: "raw" });
+  const upstream = `${KINDS.upstream.prefix}${request.token()}`;
+  const url = request.origin && /^https?:\/\//.test(request.origin) ? request.origin : undefined;
+  make("upstream", "Upstream", {
+    schema: RECORD_SCHEMA,
+    id: upstream,
+    kind: "upstream",
+    created,
+    source,
+    retrieved_at: request.retrieved_at,
+    retrieved_by: { ...request.actor },
+    sha256,
+    size,
+    media_type,
+    ...url ? { url } : {},
+    ...request.origin && !url ? { note: `Obtained from: ${request.origin}` } : {},
+    ...request.version ? { version: request.version } : {}
+  });
+  return { source, new_source: !named, upstream, records };
+}
+var STAGES = ["record", "captured", "text"];
+var HAS = ["identifiers", "lookup", "tags"];
+function listSources(corpus, query = {}) {
+  const texts = new Set([...corpus.texts.values()].map((t) => t.manifest.data).filter((d) => !isRetired(d)).map((d) => String(d.source)));
+  const captured = new Set(active2(corpus, "upstream").map((u) => String(u.data.source)));
+  const looked = new Set(active2(corpus, "resolution").filter((r) => r.data.outcome === "found").map((r) => String(r.data.source)));
+  return active2(corpus, "source").map((file) => {
+    const data = file.data;
+    const source = idOf(file);
+    const tags = strings2(data.tags);
+    const has = [
+      ...list4(data.identifiers).length > 0 ? ["identifiers"] : [],
+      ...looked.has(source) ? ["lookup"] : [],
+      ...tags.length > 0 ? ["tags"] : []
+    ];
+    const key = str(data.citation_key);
+    const title = recordedValue(data, "title");
+    return { source, ...key ? { citation_key: key } : {}, ...title ? { title } : {}, stage: texts.has(source) ? "text" : captured.has(source) ? "captured" : "record", has, tags };
+  }).filter((s) => (query.tags ?? []).every((t) => tagMatches(s.tags, t)) && (!query.stage || s.stage === query.stage) && (query.has ?? []).every((h) => s.has.includes(h))).sort((a, b) => (a.citation_key ?? a.source) < (b.citation_key ?? b.source) ? -1 : 1);
+}
+var who = (actor) => isObject(actor) ? `${String(actor.kind)} ${String(actor.name)}` : "unknown";
+function sourceHistory(corpus, name) {
+  const file = findSource(corpus, name);
+  const source = idOf(file);
+  const events = [];
+  const add = (stamp, record, what, from) => {
+    if (isObject(stamp))
+      events.push({ at: String(stamp.at), by: who(stamp.by), record, what, ...from ? { from } : {} });
+  };
+  add(file.data.created, source, "source record created");
+  const mine = corpus.records.filter((f) => f.state === "ok" && f.data && f.data.source === source);
+  const textIds = new Set(mine.filter((f) => f.data.kind === "source_text").map((f) => idOf(f)));
+  for (const record of corpus.records.filter((f) => f.state === "ok" && f.data && (f.data.source === source || textIds.has(String(f.data.text))))) {
+    const data = record.data;
+    const id = idOf(record);
+    const kind = String(data.kind);
+    if (kind === "upstream") {
+      add(data.created, id, `original captured: sha256 ${String(data.sha256).slice(0, 12)}, ${String(data.size)} bytes, ${String(data.media_type)}, got ${String(data.retrieved_at)}`, str(data.url) ?? str(data.note));
+    } else if (kind === "source_text") {
+      const original = isObject(data.original) ? data.original : {};
+      const conversion = isObject(data.conversion) ? data.conversion : {};
+      add(data.created, id, `mapped to text: ${list4(data.pages).length} ${data.paged === true ? "page" : "section"} file(s), method ${String(conversion.method)}`, original.obtained_from === "unknown" ? undefined : str(original.obtained_from));
+      add(data.changed, id, "text labels set or a person's edits sealed (latest)");
+    } else if (kind === "resolution") {
+      const identifier = isObject(data.identifier) ? data.identifier : {};
+      add(data.created, id, `catalogue lookup saved: ${String(data.resolver)} ${String(identifier.scheme)}:${String(identifier.value)}, ${String(data.outcome)}`, str(data.url));
+    } else if (kind === "passage")
+      add(data.created, id, "passage captured");
+    else if (kind === "comparison_run")
+      add(data.created, id, "source text compared", str(data.against));
+    else if (kind === "text_review")
+      add(data.created, id, `review or flag: ${String(data.scope)}, ${String(data.outcome)}`, str(data.against));
+    if (isObject(data.retired))
+      add(data.retired.stamp, id, `retired this ${kind}: ${String(data.retired.reason)}`);
+  }
+  for (const change of list4(file.data.changes)) {
+    const value = change.action === "replaced" ? `${String(change.previous)} -> ${String(change.value)}` : String(change.value);
+    add(change, source, `${String(change.action)} ${String(change.field)}: ${value}`, str(change.from));
+  }
+  if (isObject(file.data.retired))
+    add(file.data.retired.stamp, source, `retired this source: ${String(file.data.retired.reason)}`);
+  return { source, events: events.map((e, i) => ({ e, i })).sort((a, b) => Date.parse(a.e.at) - Date.parse(b.e.at) || a.i - b.i).map((x) => x.e) };
 }
 // packages/extract/src/index.ts
 import { existsSync } from "fs";
@@ -112811,7 +113254,7 @@ import { resolve as resolve2 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.7",
+  version: "0.0.8",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
@@ -112909,14 +113352,170 @@ function reportRecords(options, results, head, extra) {
 }
 var written = (root, paths) => validateFiles(openCorpus(root), new Set(paths));
 
+// packages/cli/src/enrich.ts
+import { resolve as resolve3 } from "path";
+var TIME2 = /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/;
+function sourceCapture(options, file) {
+  if (!file)
+    throw usageError("source capture needs an original file.");
+  const actor = requireActor(options, "source capture records who captured the original");
+  if (!options["acquired-at"] || !TIME2.test(options["acquired-at"])) {
+    throw usageError("source capture records when you got the original and does not guess it: give --acquired-at, for example 2026-01-05T09:58:00Z.");
+  }
+  const root = requireProject(options);
+  const original = readOriginal(resolve3(root, file), LIMITS.input_bytes);
+  const plan = planCapture(openCorpus(root), {
+    original,
+    retrieved_at: options["acquired-at"],
+    actor,
+    now: new Date,
+    token: randomToken,
+    ...options.source !== undefined ? { source: options.source } : {},
+    ...options.origin ? { origin: options.origin } : {},
+    ...options["source-version"] ? { version: options["source-version"] } : {}
+  });
+  cacheOriginal(root, original.bytes, original.sha256);
+  const { records, ...result } = plan;
+  if (records.length === 0) {
+    emit(options, { ...result, sha256: original.sha256 }, `This original is already held for source ${plan.source} (sha256 ${original.sha256}). Nothing was written. To record it for another source too, name that source with --source.
+`);
+    return 0;
+  }
+  for (const record of records)
+    writeProjectFile(root, record.path, record.text);
+  const head = [
+    `Captured the original for source ${plan.source}${plan.new_source ? " (new, a candidate)" : ""}.`,
+    `  sha256 ${original.sha256} (${original.size} bytes, ${original.media_type}); a copy is in .stemma/originals/, which git ignores`,
+    "It has no text yet. When you want it: source convert <original> --source " + plan.source + " --actor <kind>:<name>"
+  ].join(`
+`);
+  return reportRecords(options, written(root, records.map((r) => r.path)), `${head}
+`, { ...result, sha256: original.sha256 });
+}
+var pair = (value, mark, option) => {
+  const at = value.indexOf(mark);
+  const [field, rest] = [value.slice(0, at).trim(), value.slice(at + 1).trim()];
+  if (at < 1 || !field || !rest)
+    throw usageError(`--${option} is written <name>${mark}<value>.`);
+  return { field, value: rest };
+};
+function sourceEnrich(options, name) {
+  if (!name)
+    throw usageError("source enrich needs a source ID or citation key.");
+  const actor = requireActor(options, "source enrich records who added the details");
+  const identifiers = (options["add-identifier"] ?? []).map((v) => pair(v, ":", "add-identifier"));
+  const details = (options.set ?? []).map((v) => pair(v, "=", "set"));
+  const authors = options.author ?? [];
+  if (!options.lookup && identifiers.length + details.length + authors.length === 0) {
+    throw usageError("source enrich needs --add-identifier, --set, --author, or --lookup.");
+  }
+  const root = requireProject(options);
+  const plan = planEnrich(openCorpus(root), {
+    source: name,
+    identifiers,
+    details,
+    authors,
+    replace: options.replace === true,
+    actor,
+    now: new Date,
+    ...options.lookup ? { lookup: options.lookup } : {},
+    ...options.from ? { from: options.from } : {}
+  });
+  const { record, ...result } = plan;
+  if (record)
+    writeProjectFile(root, record.path, record.text);
+  const lines = [
+    ...plan.added.map((d) => `  added ${d.field}: ${printable(d.value)}`),
+    ...plan.replaced.map((d) => `  replaced ${d.field}: ${printable(d.previous)} -> ${printable(d.value)}`),
+    ...plan.same.length > 0 ? [`  already recorded and agreeing: ${plan.same.join(", ")}`] : [],
+    ...plan.notes.map((n) => `  note: ${printable(n)}`),
+    ...plan.disagreements.length > 0 ? [
+      "Disagreements. The recorded value was kept:",
+      ...plan.disagreements.map((d) => `  ${d.field}
+    recorded: ${printable(d.recorded)}
+    offered:  ${printable(d.offered)}`),
+      "To take an offered value, give it with --set, --author or --add-identifier, plus --replace and --from."
+    ] : [],
+    record ? `From: ${printable(plan.from)}. No source file was changed.` : "Nothing new, so nothing was written."
+  ];
+  const head = `Source ${plan.source}
+${lines.join(`
+`)}
+`;
+  const code = record ? reportRecords(options, written(root, [record.path]), head, result) : (emit(options, result, head), 0);
+  return plan.disagreements.length > 0 ? 1 : code;
+}
+function sourceTag(options, names) {
+  const add = options.add ?? [];
+  const remove = options.remove ?? [];
+  if (names.length === 0 || add.length + remove.length === 0)
+    throw usageError("source tag needs one or more source IDs or citation keys, with --add <tag> or --remove <tag>.");
+  const actor = requireActor(options, "source tag records who changed the tags");
+  const root = requireProject(options);
+  const corpus = openCorpus(root);
+  const now = new Date;
+  const plans = [...new Set(names.map((name) => findSource(corpus, name).data.id))].map((source) => planTags(corpus, { source, add, remove, actor, now, ...options.from ? { from: options.from } : {} }));
+  for (const { record } of plans)
+    if (record)
+      writeProjectFile(root, record.path, record.text);
+  const lines = plans.map((p) => {
+    const changed = [...p.added.map((t) => `+${t}`), ...p.removed.map((t) => `-${t}`)].join(" ");
+    return `${p.source}: ${changed || "no change"}; tags now: ${p.tags.join(", ") || "none"}`;
+  });
+  emit(options, { sources: plans.map(({ record, ...rest }) => rest) }, `${lines.join(`
+`)}
+`);
+  return 0;
+}
+function sourceList(options) {
+  const stage = options.stage;
+  if (stage !== undefined && !STAGES.includes(stage))
+    throw usageError(`--stage is one of ${STAGES.join(", ")}.`);
+  const has = options.has ?? [];
+  if (has.some((h) => !HAS.includes(h)))
+    throw usageError(`--has is one of ${HAS.join(", ")}.`);
+  const sources = listSources(openCorpus(requireProject(options)), {
+    ...options.tag ? { tags: options.tag } : {},
+    ...stage ? { stage } : {},
+    has
+  });
+  const counts = new Map;
+  for (const tag of sources.flatMap((s) => s.tags))
+    counts.set(tag, (counts.get(tag) ?? 0) + 1);
+  const lines = sources.map((s) => [
+    `${s.citation_key ?? "(no key)"}  ${s.source}  ${s.stage}${s.has.length > 0 ? `; has ${s.has.join(", ")}` : ""}`,
+    `    ${printable(s.title ?? "(no title recorded)")}${s.tags.length > 0 ? `
+    tags: ${s.tags.join(", ")}` : ""}`
+  ].join(`
+`));
+  const tagLine = [...counts].sort(([a], [b]) => a < b ? -1 : 1).map(([t, n]) => `${t} (${n})`).join(", ");
+  emit(options, { sources }, `${[...lines, `${sources.length} source(s).${tagLine ? ` Tags: ${tagLine}.` : ""}`].join(`
+`)}
+`);
+  return 0;
+}
+function sourceHistoryCommand(options, name) {
+  if (!name)
+    throw usageError("source history needs a source ID or citation key.");
+  const history = sourceHistory(openCorpus(requireProject(options)), name);
+  if (history.events.length === 0)
+    throw new InvalidInput("That source record has no dated events.");
+  const lines = history.events.map((e) => `${e.at}  ${printable(e.by)}  ${printable(e.what)}  [${e.record}]${e.from ? `
+    from: ${printable(e.from)}` : ""}`);
+  emit(options, history, `${[`History of ${history.source}, from the project's records. A hand edit shows only in git.`, ...lines].join(`
+`)}
+`);
+  return 0;
+}
+
 // packages/cli/src/ingest.ts
-import { dirname as dirname3, resolve as resolve4 } from "path";
+import { dirname as dirname3, resolve as resolve5 } from "path";
 import { createHash as createHash4 } from "crypto";
 
 // packages/cli/src/sources.ts
 import { createHash as createHash3 } from "crypto";
 import { writeFileSync as writeFileSync3 } from "fs";
-import { resolve as resolve3 } from "path";
+import { resolve as resolve4 } from "path";
 
 // packages/cli/src/conversion.ts
 var PDF_PROBLEMS = {
@@ -113011,7 +113610,6 @@ function suppliedPages(bytes, method, tool) {
 
 // packages/cli/src/sources.ts
 var MODEL_NOTICE = "Stemma holds back no source: any source in this project may be sent to a hosted model.";
-var TIME2 = /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/;
 var only = (value, allowed, flag) => {
   if (value !== undefined && !allowed.includes(value))
     throw usageError(`--${flag} is one of ${allowed.join(", ")}.`);
@@ -113057,8 +113655,8 @@ function proposalText(proposal) {
 async function sourcePages(options, file) {
   if (!file)
     throw usageError("source pages needs an original file.");
-  const base = options.project ? resolve3(options.project) : process.cwd();
-  const original = readOriginal(resolve3(base, file), LIMITS.input_bytes);
+  const base = options.project ? resolve4(options.project) : process.cwd();
+  const original = readOriginal(resolve4(base, file), LIMITS.input_bytes);
   const layer = namedFile(base, options["text-layer"], LIMITS.text_bytes);
   let pages;
   let embedded;
@@ -113072,7 +113670,7 @@ async function sourcePages(options, file) {
   const proposal = proposalFor(pages, embedded, namedFile(base, options["page-numbers"], LIMITS.page_map_bytes));
   let out = "";
   if (options.out) {
-    out = resolve3(base, options.out);
+    out = resolve4(base, options.out);
     try {
       writeFileSync3(out, canonical(proposal.runs.map((r) => r.segment)), { flag: "wx" });
     } catch {
@@ -113087,6 +113685,15 @@ async function sourcePages(options, file) {
 `)}
 `);
   return 0;
+}
+function sameText(corpus, plan) {
+  const digests = plan.files.filter((f) => !f.path.endsWith("/source.md")).map((f) => fileDigest(f.text)).join();
+  for (const [text, loaded] of corpus.texts) {
+    const data = loaded.manifest.data;
+    if (data.source === plan.source && !isRetired(data) && loaded.usable && data.pages.map((p) => String(p.sha256)).join() === digests)
+      return { text, directory: loaded.directory };
+  }
+  return;
 }
 async function convertAndWrite(request) {
   const { root, corpus, originals, options, actor } = request;
@@ -113178,23 +113785,52 @@ async function convertAndWrite(request) {
     ...options.note ? { note: options.note } : {},
     ...options.name ? { name: options.name } : {}
   });
+  const labelled = converted.parts.filter((p) => p.label.status === "labelled").length;
+  const repeated = sameText(corpus, plan);
+  if (repeated)
+    return { plan: { ...plan, text: repeated.text, directory: repeated.directory }, converted, notes, labelled, repeated: true };
   for (const record of plan.records)
     writeProjectFile(root, record.path, record.text);
   writeSourceDirectory(root, plan.directory, plan.files);
-  const labelled = converted.parts.filter((p) => p.label.status === "labelled").length;
-  return { plan, converted, notes, labelled };
+  return { plan, converted, notes, labelled, repeated: false };
 }
-async function sourceConvert(options, files) {
-  const actor = requireActor(options, "source convert records who captured the original");
+function asCaptured(corpus, options, originals) {
+  const held = originals.flatMap((o) => holdersOf(corpus, o.sha256));
+  if (options.source === undefined) {
+    const mapped = [...corpus.texts.values()].some((t) => !isRetired(t.manifest.data) && originals.some((o) => JSON.stringify(t.manifest.data.original).includes(o.sha256)));
+    if (held.length > 0 && !mapped) {
+      throw new CommandError(5, "already_held", `This original is already held for source ${[...new Set(held)].join(", ")}. Nothing was written. Name the source with --source.`, [...new Set(held)]);
+    }
+    return options;
+  }
+  const source = String(findSource(corpus, options.source).data.id);
+  const upstream = originals[0] ? upstreamOf(corpus, source, originals[0].sha256) : undefined;
+  const origin = upstream && (typeof upstream.url === "string" ? upstream.url : /^Obtained from: (.*)$/s.exec(String(upstream.note ?? ""))?.[1]);
+  return {
+    ...options,
+    source,
+    ...upstream && !options["acquired-at"] ? { "acquired-at": String(upstream.retrieved_at) } : {},
+    ...origin && !options.origin ? { origin } : {},
+    ...typeof upstream?.version === "string" && !options["source-version"] ? { "source-version": upstream.version } : {}
+  };
+}
+async function sourceConvert(given, files) {
+  const actor = requireActor(given, "source convert records who captured the original");
+  if (files.some((f) => /^[a-z][a-z0-9+.-]+:\/\//i.test(f)))
+    throw usageError("source convert reads files. To fetch from a web address, list it in an ingest plan.");
+  const root = requireProject(given);
+  const corpus = openCorpus(root);
+  const originals = [...files, ...given.image ?? []].map((f) => readOriginal(resolve4(root, f), LIMITS.input_bytes));
+  const options = asCaptured(corpus, given, originals);
   if (!options["acquired-at"] || !TIME2.test(options["acquired-at"])) {
     throw usageError("source convert records when you got the original and does not guess it: give --acquired-at, for example 2026-01-05T09:58:00Z.");
   }
-  if (files.some((f) => /^[a-z][a-z0-9+.-]+:\/\//i.test(f)))
-    throw usageError("source convert reads files. To fetch from a web address, list it in an ingest plan.");
-  const root = requireProject(options);
-  const corpus = openCorpus(root);
-  const originals = [...files, ...options.image ?? []].map((f) => readOriginal(resolve3(root, f), LIMITS.input_bytes));
-  const { plan, converted, labelled } = await convertAndWrite({ root, corpus, originals, options, actor });
+  const { plan, converted, labelled, repeated } = await convertAndWrite({ root, corpus, originals, options, actor });
+  if (repeated) {
+    emit(options, { source: plan.source, text: plan.text, directory: plan.directory, written: false }, `This conversion is already held as ${plan.text} in ${plan.directory}/. Nothing was written.
+`);
+    return 0;
+  }
   const unit = plan.paged ? "page" : "section";
   const head = [
     `Wrote the source file ${plan.text} to ${plan.directory}/`,
@@ -113301,7 +113937,7 @@ async function sourceVerify(options, id) {
   const actor = requireActor(options, "source verify records who ran the comparison");
   const root = requireProject(options);
   const corpus = openCorpus(root);
-  const original = readOriginal(resolve3(root, options.original), LIMITS.input_bytes);
+  const original = readOriginal(resolve4(root, options.original), LIMITS.input_bytes);
   const done = await reconvert(root, corpus, id, original, actor);
   if (!done.reconvertible) {
     emit(options, { text: id, original_matches: true, ...done }, "The file is the recorded original: its digest matches. Its text was supplied by a tool or typed, so Stemma cannot make it again; compare it with `source compare` or record a review.\n");
@@ -113523,8 +114159,16 @@ async function resolveCommand(options, sources) {
     if (corpus.byId.get(source)?.data?.kind !== "source")
       throw new InvalidInput(`No readable source record has the ID ${source}.`);
     const wanted = via ? [{ resolver: via, scheme: via === "crossref" ? "doi" : "ia", value: options.identifier }] : corpus.records.filter((f) => f.data?.kind === "upstream" && f.data.source === source && !isRetired(f.data)).flatMap((f) => Array.isArray(f.data.lookups) ? f.data.lookups.filter(isObject) : []).map((l) => ({ resolver: String(l.resolver), scheme: String(l.identifier.scheme), value: String(l.identifier.value) }));
+    if (wanted.length === 0) {
+      const held = corpus.byId.get(source).data.identifiers;
+      for (const i of Array.isArray(held) ? held.filter(isObject) : []) {
+        const resolver = resolverFor(String(i.scheme));
+        if (resolver)
+          wanted.push({ resolver, scheme: String(i.scheme), value: String(i.value) });
+      }
+    }
     if (wanted.length === 0)
-      lines.push(`${source}: its upstream records list no lookup; give --via and --identifier.`);
+      lines.push(`${source}: no lookup is listed and the record has no identifier this version looks up; give --via and --identifier.`);
     for (const lookup of wanted) {
       if (!RESOLVERS.includes(lookup.resolver) || resolverFor(lookup.scheme) !== lookup.resolver) {
         lines.push(`${source}: this version does not look up ${lookup.scheme} at ${lookup.resolver}.`);
@@ -113534,7 +114178,7 @@ async function resolveCommand(options, sources) {
       try {
         const record = await lookUp(root, source, lookup.resolver, lookup.scheme, lookup.value, actor);
         made.push(record.path);
-        lines.push(`${source}: saved ${record.id} (${lookup.resolver} ${lookup.value})`);
+        lines.push(`${source}: saved ${record.id} (${lookup.resolver} ${lookup.value}). To take what it adds and see where it differs: source enrich ${source} --lookup ${record.id}`);
       } catch (error) {
         if (!(error instanceof FetchRefused))
           throw error;
@@ -113550,13 +114194,13 @@ async function resolveCommand(options, sources) {
 }
 
 // packages/cli/src/ingest.ts
-var list4 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
+var list5 = (value) => Array.isArray(value) ? value.filter(isObject) : [];
 var text2 = (value) => typeof value === "string" ? value : undefined;
-var active2 = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
+var active3 = (corpus, kind) => corpus.records.filter((f) => f.state === "ok" && f.data?.kind === kind && !isRetired(f.data));
 function planEntries(options, root) {
   if (!options.plan)
     return { entries: [], base: root };
-  const path = resolve4(root, options.plan);
+  const path = resolve5(root, options.plan);
   const bytes = namedFile(root, options.plan, LIMITS.page_map_bytes);
   let value;
   try {
@@ -113566,7 +114210,7 @@ function planEntries(options, root) {
   }
   if (!isObject(value) || !Array.isArray(value.captures))
     throw new InvalidInput('A plan is an object with a "captures" list.');
-  return { entries: list4(value.captures), base: dirname3(path) };
+  return { entries: list5(value.captures), base: dirname3(path) };
 }
 var asOriginal = (bytes, name) => {
   const type = mediaType(bytes, name);
@@ -113577,7 +114221,7 @@ var asOriginal = (bytes, name) => {
 async function ingest(options, check) {
   const actor = requireActor(options, "ingest records who ran it");
   const root = requireProject(options);
-  const places = (options.originals ?? []).map((p) => resolve4(root, p));
+  const places = (options.originals ?? []).map((p) => resolve5(root, p));
   const log = [];
   const say = (line) => {
     log.push(line);
@@ -113595,14 +114239,14 @@ async function ingest(options, check) {
       throw usageError(`Plan entry ${n + 1} names no source record in the project.`);
     const label = String(record.citation_key ?? source);
     const url = text2(entry.url);
-    const upstreams = active2(corpus, "upstream").filter((u) => u.data.source === source);
+    const upstreams = active3(corpus, "upstream").filter((u) => u.data.source === source);
     if (url && upstreams.some((u) => u.data.url === url))
       continue;
     let original;
     let retrieved = text2(entry.retrieved_at);
     const file = text2(entry.file);
     if (file) {
-      original = readOriginal(resolve4(base, file), LIMITS.input_bytes);
+      original = readOriginal(resolve5(base, file), LIMITS.input_bytes);
       if (!retrieved)
         throw usageError(`Plan entry ${label} gives a file, so it must say when it was retrieved (retrieved_at); that is never guessed.`);
     } else if (url && options.fetch) {
@@ -113626,14 +114270,14 @@ async function ingest(options, check) {
       continue;
     const auxiliary = [];
     let pageNumbers;
-    for (const aux of list4(entry.auxiliary)) {
+    for (const aux of list5(entry.auxiliary)) {
       const path = text2(aux.file);
       if (!path || !text2(aux.url))
         continue;
       const found = namedFile(base, path, LIMITS.page_map_bytes);
       auxiliary.push({ role: String(aux.role), url: String(aux.url), sha256: createHash4("sha256").update(found).digest("hex"), size: found.length });
       if (aux.role === "page_numbers")
-        pageNumbers = resolve4(base, path);
+        pageNumbers = resolve5(base, path);
     }
     const id = `${KINDS.upstream.prefix}${randomToken()}`;
     const now = new Date().toISOString().replace(/\.\d+Z$/, "Z");
@@ -113657,7 +114301,7 @@ async function ingest(options, check) {
     };
     assertValid("Upstream", "upstream", canonical(upstream));
     cacheOriginal(root, original.bytes, original.sha256);
-    const held = [...corpus.texts.values()].some((t) => t.manifest.data.source === source && !isRetired(t.manifest.data) && list4(t.manifest.data.original.files).some((f) => f.sha256 === original.sha256));
+    const held = [...corpus.texts.values()].some((t) => t.manifest.data.source === source && !isRetired(t.manifest.data) && list5(t.manifest.data.original.files).some((f) => f.sha256 === original.sha256));
     if (!held) {
       const convert = isObject(entry.convert) ? entry.convert : {};
       const done = await convertAndWrite({
@@ -113676,7 +114320,7 @@ async function ingest(options, check) {
           ...text2(convert.recognition) ? { recognition: text2(convert.recognition) } : {},
           ...text2(convert.name) ? { name: text2(convert.name) } : {},
           ...text2(convert.coverage_note) ? { "coverage-note": text2(convert.coverage_note) } : {},
-          ...text2(convert.page_map) ? { "page-map": resolve4(base, text2(convert.page_map)) } : original.media_type === "application/pdf" ? { "auto-pages": true } : {},
+          ...text2(convert.page_map) ? { "page-map": resolve5(base, text2(convert.page_map)) } : original.media_type === "application/pdf" ? { "auto-pages": true } : {},
           ...pageNumbers ? { "page-numbers": pageNumbers } : {}
         }
       });
@@ -113685,7 +114329,7 @@ async function ingest(options, check) {
     writeProjectFile(root, recordPath("upstream", id), canonical(upstream));
   }
   say("== 2. Reverify against originals");
-  const upstreams = active2(openCorpus(root), "upstream");
+  const upstreams = active3(openCorpus(root), "upstream");
   let compared = 0;
   let current = 0;
   const unavailable = [];
@@ -113693,7 +114337,7 @@ async function ingest(options, check) {
     const data = upstream.data;
     const corpus = openCorpus(root);
     const label = String(corpus.byId.get(String(data.source))?.data?.citation_key ?? data.source);
-    const mine = [...corpus.texts].filter(([, t]) => t.manifest.data.source === data.source && !isRetired(t.manifest.data) && list4(t.manifest.data.original.files).some((f) => f.sha256 === data.sha256));
+    const mine = [...corpus.texts].filter(([, t]) => t.manifest.data.source === data.source && !isRetired(t.manifest.data) && list5(t.manifest.data.original.files).some((f) => f.sha256 === data.sha256));
     const todo = mine.map(([id, t]) => ({ id, loaded: t, standing: reconversions(corpus, id).find((r) => currentRun(r.data, t, tools()))?.data })).filter((m) => options.reconvert || !m.standing);
     current += mine.length - todo.length;
     const wanted = { sha256: String(data.sha256), size: Number(data.size) };
@@ -113740,11 +114384,11 @@ async function ingest(options, check) {
   let made = 0;
   let saved = 0;
   for (const upstream of upstreams) {
-    for (const lookup of list4(upstream.data.lookups)) {
+    for (const lookup of list5(upstream.data.lookups)) {
       const identifier = isObject(lookup.identifier) ? lookup.identifier : {};
       const [resolver, scheme, value] = [String(lookup.resolver), String(identifier.scheme), String(identifier.value)];
       const source = String(upstream.data.source);
-      const have = active2(openCorpus(root), "resolution").some((r) => r.data.source === source && r.data.resolver === resolver && isObject(r.data.identifier) && r.data.identifier.value === value);
+      const have = active3(openCorpus(root), "resolution").some((r) => r.data.source === source && r.data.resolver === resolver && isObject(r.data.identifier) && r.data.identifier.value === value);
       if (have && !refresh) {
         saved++;
         continue;
@@ -113795,6 +114439,13 @@ The plugin runs this through its launcher: sh scripts/stemma.sh <data directory>
   doctor
   init --project <dir>
   ingest --actor <kind>:<name> [--plan <file>] [--originals <dir>]... [--fetch] [--reconvert] [--refresh-lookups]
+  source capture <original> --actor <kind>:<name> --acquired-at <time> [--source <id|key>] [--origin <text>]
+             [--source-version <text>]
+  source enrich <id|key> --actor <kind>:<name> [--from <text>] [--add-identifier <scheme>:<value>]...
+             [--set <name>=<value>]... [--author "<Family, Given>"]... [--replace] | --lookup <resolution id>
+  source tag <id|key>... --actor <kind>:<name> [--add <tag>]... [--remove <tag>]... [--from <text>]
+  source list [--tag <tag|namespace:>]... [--stage record|captured|text] [--has identifiers|lookup|tags]...
+  source history <id|key>
   source pages <original> [--text-layer <file>] [--page-numbers <file>] [--out <file>]
   source convert [<original>] --source <id> --acquired-at <time> --actor <kind>:<name> [--origin <text>]
              [--source-version <text>] [--held-at <text>] [--description <text>] [--image <file>]...
@@ -113909,10 +114560,26 @@ var OPTIONS = {
   reason: STRING,
   "replaced-by": STRING,
   finding: STRING,
-  effect: STRING
+  effect: STRING,
+  "add-identifier": LIST,
+  set: LIST,
+  author: LIST,
+  lookup: STRING,
+  replace: FLAG,
+  from: STRING,
+  add: LIST,
+  remove: LIST,
+  tag: LIST,
+  stage: STRING,
+  has: LIST
 };
 var COMMAND_OPTIONS = {
   "source convert": ["actor", "source", "origin", "acquired-at", "source-version", "held-at", "description", "image", "text-layer", "transcription", "method", "recognition", "tool", "tool-version", "page-map", "auto-pages", "page-numbers", "identity", "coverage-note", "note", "name"],
+  "source capture": ["actor", "source", "origin", "acquired-at", "source-version"],
+  "source enrich": ["actor", "from", "add-identifier", "set", "author", "lookup", "replace"],
+  "source tag": ["actor", "from", "add", "remove"],
+  "source list": ["tag", "stage", "has"],
+  "source history": [],
   "source pages": ["text-layer", "page-numbers", "out"],
   "source label": ["actor", "page-map"],
   "source seal": ["actor", "note"],
@@ -113945,7 +114612,7 @@ function version(options) {
 }
 function doctor(options) {
   const flags = Object.fromEntries(ISOLATION_FLAGS.map((f) => [f, process.execArgv.includes(f)]));
-  const root = options.project ? resolve5(options.project) : undefined;
+  const root = options.project ? resolve6(options.project) : undefined;
   const project = root ?? "";
   const versions = tools();
   const info = {
@@ -113982,7 +114649,7 @@ function doctor(options) {
 function init(options) {
   if (!options.project)
     throw usageError("init needs --project <dir>.");
-  const root = resolve5(options.project);
+  const root = resolve6(options.project);
   const made = initProject(root);
   emit(options, { project: root, ...made }, `Created a Stemma project in ${root}
 ${made.written.map((f) => `  wrote ${f}`).join(`
@@ -114071,7 +114738,7 @@ function recordAdd(options, kind) {
   const corpus = openCorpus(root);
   let input;
   try {
-    input = readFileSync4(options.input === "-" ? 0 : resolve5(root, options.input), "utf8");
+    input = readFileSync4(options.input === "-" ? 0 : resolve6(root, options.input), "utf8");
   } catch {
     throw new InvalidInput("The input file cannot be read.");
   }
@@ -114204,6 +114871,20 @@ function dispatch(command, rest, options) {
     case "coverage":
       only(1);
       return coverage(options, rest[0]);
+    case "source capture":
+      only(1);
+      return sourceCapture(options, rest[0]);
+    case "source enrich":
+      only(1);
+      return sourceEnrich(options, rest[0]);
+    case "source tag":
+      return sourceTag(options, rest);
+    case "source list":
+      only(0);
+      return sourceList(options);
+    case "source history":
+      only(1);
+      return sourceHistoryCommand(options, rest[0]);
     case "source pages":
       only(1);
       return sourcePages(options, rest[0]);
