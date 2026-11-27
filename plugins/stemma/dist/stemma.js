@@ -112520,7 +112520,7 @@ import { resolve as resolve2 } from "path";
 // .claude-plugin/plugin.json
 var plugin_default = {
   name: "stemma",
-  version: "0.0.4",
+  version: "0.0.5",
   description: "Create academically rigorous research reports and books. Research and write with Claude while Stemma keeps your sources in your project and scripts check your citations and quotations against them and explain what they find. Claude sets up what the plugin needs.",
   author: {
     name: "DocumentDrivenDX",
